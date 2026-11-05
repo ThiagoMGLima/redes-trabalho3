@@ -10,6 +10,7 @@ import protocol as p
 HOST = ""
 PORT = 50007
 SERVER_ORIGIN = "Servidor"
+MAX_CLIENTS = 10
 
 
 def terminal_log(line):
@@ -198,8 +199,13 @@ class Server:
 
   def _open_session(self, sock, address):
     with self._lock:
-      self._last_client_number += 1
-      client_id = f"Cliente {self._last_client_number}"
+      full = len(self._sessions) >= MAX_CLIENTS
+      if not full:
+        self._last_client_number += 1
+        client_id = f"Cliente {self._last_client_number}"
+    if full:
+      self._refuse_connection(sock, address)
+      return
     session = Session(
       sock,
       client_id,
@@ -212,6 +218,12 @@ class Server:
       self._sessions[session] = address
     self._log(f"Conectado: {address} como {client_id}")
     session.start()
+
+  def _refuse_connection(self, sock, address):
+    """Conexão excedente: fechada imediatamente, sem identificador nem
+    mensagem ao cliente; a recusa fica registrada no servidor."""
+    sock.close()
+    self._log(f"Recusado: {address} (limite de {MAX_CLIENTS} clientes simultâneos atingido)")
 
   def _end_session(self, session, reason):
     with self._lock:
