@@ -337,6 +337,34 @@ class DownloadsRootTest(unittest.TestCase):
         self.assertEqual(file.read(), content)
     self.assertEqual(files_under(self.downloads_root), ["aulas", "notas", "permitido.txt"])
 
+  def test_object_created_at_the_destination_during_the_transfer_is_preserved_without_announcing_completion(self):
+    def create_file(destination):
+      with open(destination, "wb") as file:
+        file.write(b"criado durante")
+
+    creations = [("aulas/arquivo.txt", create_file), ("aulas/pasta.txt", os.mkdir),
+                 ("aulas/link.txt", lambda destination: os.symlink(self.outside, destination))]
+    content = os.urandom(2 * p.CHUNK_SIZE)
+    os.mkdir(self.local("aulas"))
+    for path, create in creations:
+      present = len(os.listdir(self.local("aulas")))
+      self.request(path)
+      self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
+      self.server_side.sendall(p.encode(p.FILE_DATA, content[:p.CHUNK_SIZE]))
+      self.assertTrue(wait_until(lambda: len(os.listdir(self.local("aulas"))) > present), "temporário não criado")
+      create(self.local(path))
+      self.server_side.sendall(p.encode(p.FILE_DATA, content[p.CHUNK_SIZE:]))
+      self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()}))
+      self.output.wait_for(f"Download de {path} falhou")
+
+    self.assertNotIn(CONCLUDED, self.output.text)
+    with open(self.local("aulas/arquivo.txt"), "rb") as file:
+      self.assertEqual(file.read(), b"criado durante")
+    self.assertEqual(os.listdir(self.local("aulas/pasta.txt")), [])
+    self.assertEqual(os.readlink(self.local("aulas/link.txt")), self.outside)
+    self.assertEqual(sorted(os.listdir(self.local("aulas"))), ["arquivo.txt", "link.txt", "pasta.txt"])
+    self.assertEqual(files_under(self.outside), [])
+
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
     with open(self.local("meu.txt"), "wb") as file:
       file.write(b"meu")
