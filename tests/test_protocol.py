@@ -5,6 +5,7 @@ import time
 import unittest
 
 import protocol as p
+from tests.support import tcp_pair
 
 
 def send_in_pieces(sock, data, sizes=(), pause=0.02):
@@ -193,23 +194,11 @@ class ReceiveDeadlineTest(unittest.TestCase):
     self.assertEqual(p.RECEIVE_TIMEOUT, 10)
 
 
-def small_buffer_tcp_pair():
-  """Conexão TCP local com buffers pequenos, para que um frame de 64 KiB só
-  avance quando o outro lado lê."""
-  with socket.create_server(("127.0.0.1", 0)) as listener:
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-    sender = socket.socket()
-    sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-    sender.connect(listener.getsockname())
-    receiver, _ = listener.accept()
-  return sender, receiver
-
-
 class SendDeadlineTest(unittest.TestCase):
   TIMEOUT = 0.3
 
   def setUp(self):
-    self.sender, self.receiver = small_buffer_tcp_pair()
+    self.sender, self.receiver = tcp_pair(small_buffers=True)
     self.addCleanup(self.sender.close)
     self.addCleanup(self.receiver.close)
 

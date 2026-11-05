@@ -1,10 +1,13 @@
+import gc
 import socket
+import threading
 import time
 import unittest
+import weakref
 
 import protocol as p
-from server import Server
-from tests.support import LogRecorder
+from server import Server, Session
+from tests.support import LogRecorder, ThreadErrors, tcp_pair, wait_until
 
 
 def address_of(sock):
@@ -150,6 +153,156 @@ class DeadlineTest(ServerTestCase):
     self.assertEqual(log.matching(f"Desconectado: {address_of(client)}"), [])
     client.sendall(p.encode(p.QUIT, {}))
     self.assertClosedByServer(client)
+
+
+class Content(dict):
+  """Conteúdo de controle que pode ser observado por referência fraca."""
+
+
+class SessionTest(unittest.TestCase):
+  """Uma sessão do servidor sobre uma conexão TCP local; `peer` faz o papel
+  do cliente."""
+
+  TIMEOUT = 0.3
+
+  def setUp(self):
+    self.thread_errors = ThreadErrors(self)
+
+  def tearDown(self):
+    self.assertEqual(self.thread_errors.errors, [])
+
+  def open_session(self, small_buffers=False, **options):
+    near, peer = tcp_pair(small_buffers)
+    self.addCleanup(peer.close)
+    closes = []
+    session = Session(
+      near,
+      "teste",
+      send_timeout=options.pop("send_timeout", self.TIMEOUT),
+      receive_timeout=options.pop("receive_timeout", self.TIMEOUT),
+      on_close=lambda session, reason: closes.append(reason),
+    )
+    session.start()
+    self.addCleanup(session.join, 5)
+    self.addCleanup(session.close, "fim do teste")
+    return session, peer, closes
+
+  def assertFinished(self, session):
+    session.join(5)
+    self.assertFalse(session.is_alive())
+
+  def assertPeerSeesEnd(self, peer):
+    peer.settimeout(5)
+    try:
+      while peer.recv(65536):
+        pass
+    except ConnectionResetError:
+      pass
+
+  def test_messages_from_many_threads_are_written_whole_and_in_order(self):
+    session, peer, _ = self.open_session(send_timeout=5)
+    block = bytes(range(256)) * 32
+
+    def produce(origin):
+      for number in range(20):
+        session.send(p.CHAT, {"origin": origin, "text": str(number)})
+        session.send(p.FILE_DATA, block)
+    producers = [threading.Thread(target=produce, args=(f"Cliente {n}",)) for n in range(4)]
+    for producer in producers:
+      producer.start()
+    for producer in producers:
+      producer.join()
+
+    received = [p.receive_message(peer, timeout=5) for _ in range(4 * 20 * 2)]
+    for origin in (f"Cliente {n}" for n in range(4)):
+      texts = [m.content["text"] for m in received if m.type == p.CHAT and m.content["origin"] == origin]
+      self.assertEqual(texts, [str(number) for number in range(20)])
+    self.assertTrue(all(m.content == block for m in received if m.type == p.FILE_DATA))
+
+  def test_send_deadline_ends_only_this_session(self):
+    blocked, blocked_peer, blocked_closes = self.open_session(small_buffers=True)
+    other, other_peer, other_closes = self.open_session()
+
+    start = time.monotonic()
+    for _ in range(4):
+      blocked.send(p.FILE_DATA, b"\0" * (64 * 1024))
+
+    self.assertTrue(wait_until(lambda: blocked_closes, timeout=5))
+    self.assertLess(time.monotonic() - start, self.TIMEOUT + 1)
+    self.assertEqual(len(blocked_closes), 1)
+    self.assertIn("prazo de envio", blocked_closes[0])
+    self.assertFinished(blocked)
+    other.send(p.CHAT, {"origin": "Servidor", "text": "ainda aqui"})
+    self.assertEqual(p.receive_message(other_peer, timeout=5).content["text"], "ainda aqui")
+    self.assertEqual(other_closes, [])
+
+  def test_cleanup_triggered_by_both_threads_at_once_runs_once(self):
+    for attempt in range(5):
+      with self.subTest(attempt=attempt):
+        session, peer, closes = self.open_session(small_buffers=True)
+
+        peer.sendall(p.encode(p.CHAT, {"text": "incompleto"})[:3])
+        for _ in range(4):
+          session.send(p.FILE_DATA, b"\0" * (64 * 1024))
+
+        self.assertFinished(session)
+        self.assertEqual(len(closes), 1)
+        self.assertIn("prazo", closes[0])
+        self.assertPeerSeesEnd(peer)
+
+  def test_concurrent_close_calls_release_once(self):
+    session, peer, closes = self.open_session()
+    barrier = threading.Barrier(8)
+
+    def close():
+      barrier.wait()
+      session.close("encerramento concorrente")
+    closers = [threading.Thread(target=close) for _ in range(8)]
+    for closer in closers:
+      closer.start()
+    peer.close()
+    for closer in closers:
+      closer.join()
+
+    self.assertFinished(session)
+    self.assertEqual(len(closes), 1)
+
+  def test_close_discards_pending_messages(self):
+    session, peer, closes = self.open_session(small_buffers=True, send_timeout=5)
+    for _ in range(4):
+      session.send(p.FILE_DATA, b"\0" * (64 * 1024))
+    pending = [Content(origin="Servidor", text=str(number)) for number in range(50)]
+    released = [weakref.ref(content) for content in pending]
+    for content in pending:
+      session.send(p.CHAT, content)
+    del pending, content
+
+    start = time.monotonic()
+    session.close("QUIT")
+    self.assertFinished(session)
+    self.assertLess(time.monotonic() - start, 1)
+
+    gc.collect()
+    self.assertEqual([ref for ref in released if ref() is not None], [])
+    peer.settimeout(5)
+    received = b""
+    try:
+      while chunk := peer.recv(65536):
+        received += chunk
+    except ConnectionResetError:
+      pass
+    self.assertNotIn(b"Servidor", received)
+    self.assertEqual(closes, ["QUIT"])
+
+  def test_messages_sent_after_close_are_ignored(self):
+    session, peer, closes = self.open_session()
+    session.close("QUIT")
+    self.assertFinished(session)
+
+    session.send(p.CHAT, {"origin": "Servidor", "text": "tarde demais"})
+
+    self.assertPeerSeesEnd(peer)
+    self.assertEqual(closes, ["QUIT"])
 
 
 if __name__ == "__main__":

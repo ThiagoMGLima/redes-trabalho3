@@ -1,4 +1,5 @@
 import argparse
+import queue
 import select
 import socket
 import threading
@@ -14,26 +15,49 @@ def terminal_log(line):
 
 
 class Session:
-  """Atendimento de uma conexão aceita."""
+  """Atendimento de uma conexão aceita.
 
-  def __init__(self, sock, name, *, receive_timeout=p.RECEIVE_TIMEOUT, on_message=None, on_close=None):
+  A thread de atendimento é a única leitora do socket e a auxiliar escritora
+  é a única que escreve nele; as demais threads entregam mensagens pela fila
+  da sessão com `send`. `close` é idempotente e pode ser chamado por qualquer
+  thread: a primeira chamada descarta a fila, interrompe as duas threads e
+  notifica `on_close` uma única vez. O socket é fechado pela thread de
+  atendimento depois que a escritora termina.
+  """
+
+  _STOP = object()
+
+  def __init__(self, sock, name, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+               on_message=None, on_close=None):
     self.sock = sock
     self.name = name
+    self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._on_message = on_message
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
+    self._outgoing = queue.Queue()
     self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
+    self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
 
   def start(self):
+    self._writer.start()
     self._reader.start()
+
+  def send(self, msg_type, content):
+    with self._lock:
+      if self._closed:
+        return
+      self._outgoing.put((msg_type, content))
 
   def close(self, reason):
     with self._lock:
       if self._closed:
         return
       self._closed = True
+      self._discard_outgoing()
+      self._outgoing.put(self._STOP)
     try:
       self.sock.shutdown(socket.SHUT_RDWR)
     except OSError:
@@ -44,10 +68,21 @@ class Session:
   def join(self, timeout=None):
     self._reader.join(timeout)
 
+  def is_alive(self):
+    return self._reader.is_alive() or self._writer.is_alive()
+
+  def _discard_outgoing(self):
+    while True:
+      try:
+        self._outgoing.get_nowait()
+      except queue.Empty:
+        return
+
   def _read_loop(self):
     try:
       self.close(self._receive_until_end())
     finally:
+      self._writer.join()
       self.sock.close()
 
   def _receive_until_end(self):
@@ -69,11 +104,27 @@ class Session:
       if self._on_message is not None:
         self._on_message(self, message)
 
+  def _write_loop(self):
+    while True:
+      item = self._outgoing.get()
+      if item is self._STOP:
+        return
+      try:
+        p.send_message(self.sock, *item, timeout=self._send_timeout)
+      except p.FrameTimeout:
+        self.close("prazo de envio expirado")
+        return
+      except OSError as error:
+        self.close(f"falha no envio: {error}")
+        return
+
 
 class Server:
-  def __init__(self, host=HOST, port=PORT, *, receive_timeout=p.RECEIVE_TIMEOUT, log=terminal_log):
+  def __init__(self, host=HOST, port=PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+               log=terminal_log):
     self._host = host
     self._port = port
+    self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._log = log
     self._lock = threading.Lock()
@@ -122,6 +173,7 @@ class Server:
     session = Session(
       sock,
       name,
+      send_timeout=self._send_timeout,
       receive_timeout=self._receive_timeout,
       on_message=self._handle_message,
       on_close=self._end_session,
