@@ -165,7 +165,13 @@ class Client:
   def _request_file(self):
     """Pede um arquivo da raiz compartilhada e volta ao menu; a receptora
     grava o download, então o menu continua disponível durante a
-    transferência."""
+    transferência. Com um download ativo (pedido pendente, transferência ou
+    verificação final), recusa localmente sem perguntar o caminho: só a
+    receptora encerra o download ativo, depois da publicação ou da falha."""
+    active = self._download
+    if active is not None:
+      show(f"Já existe um download ativo ({active.path}); aguarde sua conclusão antes de pedir outro arquivo.")
+      return
     path = input(FILE_PROMPT)
     if self._disconnected.is_set():
       return
