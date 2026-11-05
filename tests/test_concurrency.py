@@ -8,13 +8,17 @@ depende de o arquivo terminar rápido ou devagar.
 import hashlib
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, receive_within
-from tests.test_download import SIZE_12_MIB, share
+from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.test_download import CONCLUDED, SIZE_12_MIB, files_under, share
+
+ACTIVE_DOWNLOAD = "Já existe um download ativo"
 
 
 class ServerConcurrencyTest(unittest.TestCase):
@@ -98,6 +102,89 @@ class ServerConcurrencyTest(unittest.TestCase):
     self.assertEqual(self.finish_download(client, second), (b"outro", outro_sha256))
     self.assertEqual(second["others"], [])
     self.assertEqual(self.log.matching("Desconectado:"), [])
+
+
+class ScriptedServerClientTest(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
+  teste faz o papel do servidor na conexão TCP local, decidindo o que é
+  enviado e quando."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    program = install_programs(os.path.join(base.name, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    self.addCleanup(listener.close)
+    listener.settimeout(5)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+    self.server_side, _ = listener.accept()
+    self.addCleanup(self.server_side.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def send(self, msg_type, content):
+    self.server_side.sendall(p.encode(msg_type, content))
+
+  def request(self, path):
+    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
+    self.type_line("2")
+    self.type_line(path)
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+
+  def chat(self, text):
+    """Escolhe Chat e envia `text`; a mensagem chega ao servidor."""
+    self.type_line("3")
+    self.type_line(text)
+    self.assertEqual(receive_within(self.server_side), (p.CHAT, {"text": text}))
+
+  def wait_for_received_bytes(self, size):
+    """Espera o temporário do download ter `size` bytes gravados: a receptora
+    já processou tudo o que foi enviado até ali."""
+    def written():
+      return sum(os.path.getsize(os.path.join(self.downloads_root, path)) for path in files_under(self.downloads_root))
+    if not wait_until(lambda: written() == size):
+      raise AssertionError(f"{size} bytes não foram gravados: {files_under(self.downloads_root)}")
+
+  def assertSecondRequestBlockedLocally(self, phase):
+    """Arquivo é recusado localmente, sem pedir caminho nem enviar nada: a
+    próxima mensagem que chega ao servidor é o chat enviado em seguida."""
+    refusals = self.output.text.count(ACTIVE_DOWNLOAD)
+    self.type_line("2")
+    if not wait_until(lambda: self.output.text.count(ACTIVE_DOWNLOAD) > refusals):
+      raise AssertionError(f"segundo pedido não recusado com download {phase}: {self.output.text!r}")
+    self.chat(f"menu livre com download {phase}")
+
+  def test_second_request_is_blocked_locally_while_pending_transferring_or_in_the_final_check(self):
+    content = os.urandom(2 * p.CHUNK_SIZE)
+    self.request("primeiro.bin")
+    self.assertSecondRequestBlockedLocally("pendente")
+
+    self.send(p.FILE_META, {"size": len(content)})
+    self.send(p.FILE_DATA, content[:p.CHUNK_SIZE])
+    self.wait_for_received_bytes(p.CHUNK_SIZE)
+    self.assertSecondRequestBlockedLocally("em transferência")
+
+    self.send(p.FILE_DATA, content[p.CHUNK_SIZE:])
+    self.wait_for_received_bytes(len(content))
+    self.assertSecondRequestBlockedLocally("aguardando o FILE_END da verificação final")
+
+    self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
+    self.output.wait_for(CONCLUDED)
+    self.request("segundo.bin")
 
 
 if __name__ == "__main__":
