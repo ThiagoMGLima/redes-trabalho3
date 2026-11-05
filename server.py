@@ -1,4 +1,5 @@
 import argparse
+import os
 import queue
 import select
 import socket
@@ -10,6 +11,7 @@ import protocol as p
 HOST = ""
 PORT = 50007
 SERVER_ORIGIN = "Servidor"
+SHARED_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
 
 
 def terminal_log(line):
@@ -140,9 +142,10 @@ class Session:
 
 class Server:
   def __init__(self, host=HOST, port=PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
-               log=terminal_log):
+               log=terminal_log, shared_root=SHARED_ROOT):
     self._host = host
     self._port = port
+    self._shared_root = shared_root
     self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._log = log
@@ -222,6 +225,9 @@ class Server:
     if message.type == p.CHAT:
       self._receive_chat(session, message.content)
       return
+    if message.type == p.FILE_REQUEST:
+      self._receive_file_request(session, message.content)
+      return
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
 
   def _receive_chat(self, session, content):
@@ -235,6 +241,15 @@ class Server:
       self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
       return
     self._deliver(session.name, text, skip=session)
+
+  def _receive_file_request(self, session, content):
+    path = content["path"]
+    try:
+      file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
+    except FileNotFoundError:
+      self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
+      return
+    file.close()
 
   def _refuse(self, session, operation, code, message):
     """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""
