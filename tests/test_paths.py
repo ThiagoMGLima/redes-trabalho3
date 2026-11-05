@@ -323,8 +323,11 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(files_under(os.path.join(self.base, "real")), [])
 
   def test_link_that_appears_in_a_download_folder_after_the_request_fails_the_download_writing_nothing(self):
-    """As pastas são verificadas de novo ao criar as que faltam: um link que
-    surge depois do pedido não leva o conteúdo para fora da raiz."""
+    """As pastas são verificadas de novo no FILE_META, ao criar as que
+    faltam: um link que surge entre o pedido e o FILE_META faz o download
+    falhar sem gravar nada fora da raiz. Um link que surge depois, durante
+    a transferência, é coberto pelos testes de pasta e de temporário
+    substituídos durante a transferência."""
     self.request("aulas/2024/resumo.pdf")
     self.link("aulas", self.outside)
 
