@@ -198,6 +198,7 @@ class Session:
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
+    self._download_active = False
     self._outgoing = queue.Queue(MAX_PENDING)
     self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
     self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
@@ -209,12 +210,20 @@ class Session:
   def send(self, msg_type, content):
     self._enqueue((msg_type, content))
 
+  @property
+  def download_active(self):
+    """Há um arquivo entregue a `send_file` cujo FILE_END ainda não seguiu
+    para envio. A escritora libera o download antes de enviar o FILE_END, de
+    modo que quem o recebe já pode pedir outro arquivo."""
+    return self._download_active
+
   def send_file(self, file):
     """Enfileira o envio incremental de `file`, aberto em modo binário; a
     escritora o lê bloco a bloco, alternando com as mensagens da fila. A
     sessão passa a ser dona do arquivo e o fecha ao terminar o envio ou ao
-    ser encerrada."""
+    ser encerrada. O download fica ativo até o FILE_END."""
     transfer = FileTransfer(file)
+    self._download_active = True
     if not self._enqueue(transfer):
       transfer.close()
 
@@ -314,9 +323,11 @@ class Session:
         if active is None and files:
           active = files.popleft()
         if active is not None:
-          p.send_message(self.sock, *active.next_message(), timeout=self._send_timeout)
+          message = active.next_message()
           if active.finished:
             active = None
+            self._download_active = False
+          p.send_message(self.sock, *message, timeout=self._send_timeout)
     except p.FrameTimeout:
       return "prazo de envio expirado"
     except OSError as error:
@@ -450,7 +461,11 @@ class Server:
 
   def _receive_file_request(self, session, content):
     """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
-    escritora da sessão, que o envia bloco a bloco."""
+    escritora da sessão, que o envia bloco a bloco. Enquanto a sessão tem um
+    download ativo, todo pedido recebe BUSY e o envio atual prossegue."""
+    if session.download_active:
+      self._refuse(session, "FILE_REQUEST", p.BUSY, "Já existe um download ativo nesta sessão")
+      return
     path = content.get("path") if isinstance(content, dict) else None
     if not isinstance(path, str):
       self._refuse(
