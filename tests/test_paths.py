@@ -386,6 +386,31 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(files_under(self.outside) + files_under(self.local("aulas-real")), [])
     self.assertSessionContinues()
 
+  def test_temporary_replaced_by_a_link_during_the_transfer_publishes_nothing(self):
+    """Com o temporário já criado e antes do FILE_END, um link para um
+    arquivo de fora da raiz toma o lugar do temporário. O SHA-256 confere,
+    porque é calculado sobre o que chegou pela conexão, mas o download
+    falha: o destino não recebe o link nem o arquivo de fora, que fica
+    intacto, e a sessão continua."""
+    personal = os.path.join(self.outside, "pessoal.txt")
+    with open(personal, "wb") as file:
+      file.write(b"CONTEUDO PESSOAL, NAO VERIFICADO")
+    os.mkdir(self.local("aulas"))
+    finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
+    [temporary] = os.listdir(self.local("aulas"))
+    os.symlink(personal, self.local("aulas/troca"))
+    os.replace(self.local("aulas/troca"), self.local(f"aulas/{temporary}"))
+
+    finish()
+
+    self.output.wait_for("Download de aulas/resumo.pdf falhou")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertFalse(os.path.lexists(self.local("aulas/resumo.pdf")))
+    with open(personal, "rb") as file:
+      self.assertEqual(file.read(), b"CONTEUDO PESSOAL, NAO VERIFICADO")
+    self.assertEqual(os.stat(personal).st_nlink, 1)
+    self.assertSessionContinues()
+
   @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
   def test_download_folder_swapped_with_a_link_during_downloads_leaves_nothing_outside_the_root(self):
     """Uma thread troca sem parar a pasta `aulas` por um link para fora da

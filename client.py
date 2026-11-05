@@ -196,6 +196,7 @@ class Download:
     self._folder = None
     self._temp = None
     self._temp_name = None
+    self._identity = None
 
   def start(self, size):
     """Cria as pastas que faltam sob a raiz de downloads e o temporário. Se
@@ -209,6 +210,7 @@ class Download:
       self._failure = _failure_reason(error)
       return
     descriptor, self._temp_name = _create_temporary(self._folder)
+    self._identity = _identity(os.fstat(descriptor))
     self._temp = os.fdopen(descriptor, "wb")
 
   def write(self, block):
@@ -222,9 +224,11 @@ class Download:
   def finish(self, sha256):
     """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
     FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
-    Antes de publicar, confirma que a pasta aberta no começo ainda é a que
-    se alcança a partir da raiz de downloads sem passar por links. Levanta
-    DownloadFailed com o motivo; o temporário é sempre removido."""
+    Antes e depois de publicar, confirma que a pasta aberta no começo ainda
+    é a que se alcança a partir da raiz de downloads sem passar por links e
+    que o nome em questão é o próprio temporário verificado; se a
+    confirmação falhar depois de publicar, a publicação é desfeita. Levanta
+    DownloadFailed com o motivo; o temporário é sempre descartado."""
     if self._failure is not None:
       raise DownloadFailed(self._failure)
     try:
@@ -233,16 +237,42 @@ class Download:
         raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
       if sha256 != self._digest.hexdigest():
         raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
-      moved = self._folder_moved()
-      if moved is not None:
-        raise DownloadFailed(moved)
+      self._confirm(self._temp_name)
       try:
         os.link(self._temp_name, self._name, src_dir_fd=self._folder, dst_dir_fd=self._folder,
                 follow_symlinks=False)
       except FileExistsError:
         raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
+      try:
+        self._confirm(self._name)
+      except DownloadFailed:
+        os.unlink(self._name, dir_fd=self._folder)
+        raise
     finally:
-      os.unlink(self._temp_name, dir_fd=self._folder)
+      self._discard_temporary()
+
+  def _confirm(self, name):
+    """Levanta DownloadFailed se a pasta aberta no começo deixou de ser a
+    pasta do destino ou se `name`, nela, não é o temporário verificado."""
+    moved = self._folder_moved()
+    if moved is not None:
+      raise DownloadFailed(moved)
+    if not self._is_temporary(name):
+      raise DownloadFailed("o temporário foi substituído ou removido durante a transferência")
+
+  def _is_temporary(self, name):
+    try:
+      status = os.stat(name, dir_fd=self._folder, follow_symlinks=False)
+    except FileNotFoundError:
+      return False
+    return _identity(status) == self._identity
+
+  def _discard_temporary(self):
+    """Remove o temporário, se o nome ainda for dele, e fecha a pasta."""
+    try:
+      if self._is_temporary(self._temp_name):
+        os.unlink(self._temp_name, dir_fd=self._folder)
+    finally:
       os.close(self._folder)
 
   def _folder_moved(self):
