@@ -45,8 +45,8 @@ class FileRefused(Exception):
 def open_shared_file(root, path):
   """Abre para leitura binária o arquivo `path`, relativo à raiz
   compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
-  sintaxe proibida ou link simbólico em qualquer pasta do caminho ou no
-  arquivo, e NOT_FOUND para arquivo inexistente.
+  sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
+  ou no arquivo, e NOT_FOUND para arquivo inexistente.
 
   Cada componente é examinado em ordem, sem seguir links, antes de abrir o
   arquivo; assim um link é recusado antes de se considerar a ausência do que
@@ -55,6 +55,8 @@ def open_shared_file(root, path):
     p.check_relative_path(path)
   except p.ForbiddenPath as error:
     raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+  if os.path.islink(root):
+    raise FileRefused(p.PATH_FORBIDDEN, "Caminho inválido ou proibido: a raiz compartilhada é um link simbólico")
   parts = path.split("/")
   target = root
   for depth, part in enumerate(parts, start=1):

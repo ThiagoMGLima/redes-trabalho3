@@ -101,6 +101,22 @@ class SharedRootTest(unittest.TestCase):
              "quebrado/ausente.txt"]
     self.assertRefusedKeepingTheSession(paths, p.PATH_FORBIDDEN)
 
+  def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
+    """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
+    é um link recusa todo pedido, sem abrir nada; a sessão continua."""
+    share(self.shared_root, "presente.txt", b"presente")
+    linked_root = os.path.join(self.base, "files-link")
+    os.symlink(self.shared_root, linked_root)
+    self.start_server(shared_root=linked_root)
+    client = self.connect()
+
+    for path in ["presente.txt", "ausente.txt", "presente.txt"]:
+      client.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
+      error = receive_within(client)
+      self.assertEqual(error.type, p.ERROR, (path, error))
+      self.assertEqual(error.content["code"], p.PATH_FORBIDDEN, path)
+    self.assertEqual(self.log.matching("Desconectado:"), [])
+
 
 if __name__ == "__main__":
   unittest.main()
