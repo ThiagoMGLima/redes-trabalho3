@@ -1,15 +1,37 @@
 import hashlib
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, receive_within
+from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 SIZE_12_MIB = 12_582_912
+PROMPT = "Escolha uma opção"
+FILE_PROMPT = "Caminho do arquivo"
+CONCLUDED = "Download concluído"
+
+
+def sha256_of(path):
+  digest = hashlib.sha256()
+  with open(path, "rb") as file:
+    while block := file.read(1024 * 1024):
+      digest.update(block)
+  return digest.hexdigest()
+
+
+def share(root, path, content):
+  """Coloca um arquivo sob `root` e devolve seu SHA-256."""
+  full = os.path.join(root, *path.split("/"))
+  os.makedirs(os.path.dirname(full), exist_ok=True)
+  with open(full, "wb") as file:
+    file.write(content)
+  return hashlib.sha256(content).hexdigest()
 
 
 class ServerDownloadTest(unittest.TestCase):
@@ -44,12 +66,7 @@ class ServerDownloadTest(unittest.TestCase):
     sock.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
 
   def share(self, path, content):
-    """Coloca um arquivo na raiz compartilhada e devolve seu SHA-256."""
-    full = os.path.join(self.shared_root, *path.split("/"))
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "wb") as file:
-      file.write(content)
-    return hashlib.sha256(content).hexdigest()
+    return share(self.shared_root, path, content)
 
   def receive_download(self, sock, blocks=None):
     """Recebe FILE_META, os blocos e FILE_END de um pedido; devolve o tamanho
@@ -145,6 +162,62 @@ class ServerDownloadTest(unittest.TestCase):
     sent = original[:-p.CHUNK_SIZE] + changed_tail
     self.assertEqual(b"".join(blocks), sent)
     self.assertEqual(announced, hashlib.sha256(sent).hexdigest())
+
+
+
+class ClientDownloadTest(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa em
+  diretório temporário e com outro diretório corrente; o servidor é real e
+  compartilha outro diretório temporário."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.shared_root = os.path.join(base.name, "servidor", "files")
+    os.makedirs(self.shared_root)
+    program = install_programs(os.path.join(base.name, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+    self.working_dir = os.path.join(base.name, "outro")
+    os.mkdir(self.working_dir)
+
+    self.log = LogRecorder()
+    self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
+    self.server.start()
+    self.addCleanup(self.server.shutdown)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(self.server.address[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.working_dir,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def downloaded(self, path):
+    return os.path.join(self.downloads_root, *path.split("/"))
+
+  def download(self, path, timeout=10):
+    """Escolhe Arquivo, informa o caminho e espera a conclusão anunciada."""
+    concluded = self.output.text.count(CONCLUDED)
+    self.type_line("2")
+    self.type_line(path)
+    if not wait_until(lambda: self.output.text.count(CONCLUDED) > concluded, timeout):
+      raise AssertionError(f"download de {path!r} não concluído: {self.output.text!r}")
+
+  def test_binary_file_of_12_mib_arrives_with_the_size_and_sha256_of_the_origin(self):
+    sha256 = share(self.shared_root, "grande.bin", os.urandom(SIZE_12_MIB))
+
+    self.download("grande.bin")
+
+    self.assertEqual(os.path.getsize(self.downloaded("grande.bin")), SIZE_12_MIB)
+    self.assertEqual(sha256_of(self.downloaded("grande.bin")), sha256)
 
 
 if __name__ == "__main__":

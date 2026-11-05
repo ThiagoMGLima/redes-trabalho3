@@ -11,6 +11,7 @@ from tests.support import LogRecorder, OutputReader, receive_within, wait_until
 CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "client.py")
 PROMPT = "Escolha uma opção"
 CHAT_PROMPT = "Mensagem"
+FILE_PROMPT = "Caminho do arquivo"
 
 
 class ClientSessionTest(unittest.TestCase):
@@ -59,10 +60,12 @@ class ClientSessionTest(unittest.TestCase):
     self.assertEqual(self.client.wait(5), 0)
     self.assertIn("QUIT", self.log.wait_for("Desconectado:"))
 
-  def test_arquivo_returns_to_the_menu_without_ending_the_session(self):
+  def test_arquivo_asks_for_a_path_and_returns_to_the_menu_without_ending_the_session(self):
     self.wait_for_prompts(1)
 
     self.type_line("2")
+    self.output.wait_for(FILE_PROMPT)
+    self.type_line("ausente.txt")
     self.wait_for_prompts(2)
 
     self.assertEqual(self.log.matching("Desconectado:"), [])

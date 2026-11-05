@@ -1,12 +1,16 @@
 import argparse
+import hashlib
+import os
 import socket
 import sys
+import tempfile
 import threading
 
 import protocol as p
 
 HOST = "127.0.0.1"
 PORT = 50007
+DOWNLOADS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 
 MENU = """
 Menu:
@@ -15,6 +19,7 @@ Menu:
   3 - Chat"""
 PROMPT = "Escolha uma opção: "
 CHAT_PROMPT = "Mensagem: "
+FILE_PROMPT = "Caminho do arquivo: "
 OPTIONS = {
   "1": "sair", "sair": "sair",
   "2": "arquivo", "arquivo": "arquivo",
@@ -42,12 +47,43 @@ def parse_port(text):
   return port
 
 
+class Download:
+  """Download ativo, do pedido até a publicação. A receptora grava cada bloco
+  recebido em um temporário na pasta do destino; o destino final só recebe o
+  arquivo publicado."""
+
+  def __init__(self, path, destination):
+    self.path = path
+    self.destination = destination
+    self._temp = None
+    self._temp_path = None
+
+  def start(self, size):
+    folder = os.path.dirname(self.destination)
+    os.makedirs(folder, exist_ok=True)
+    descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
+    self._temp = os.fdopen(descriptor, "wb")
+
+  def write(self, block):
+    self._temp.write(block)
+
+  def finish(self, sha256):
+    """Fecha o temporário e o publica no destino sem sobrescrever."""
+    self._temp.close()
+    try:
+      os.link(self._temp_path, self.destination)
+    finally:
+      os.unlink(self._temp_path)
+
+
 class Client:
   """Sessão do participante. A thread principal cuida do teclado e dos
-  envios; a receptora é a única leitora do socket."""
+  envios; a receptora é a única leitora do socket e grava os downloads."""
 
-  def __init__(self, sock):
+  def __init__(self, sock, downloads_root=DOWNLOADS_ROOT):
     self._sock = sock
+    self._downloads_root = downloads_root
+    self._download = None
     self._leaving = threading.Event()
     self._disconnected = threading.Event()
     self._receiver = threading.Thread(target=self._receive_loop, name="receptora")
@@ -82,7 +118,7 @@ class Client:
       if option == "chat":
         self._chat()
       elif option == "arquivo":
-        show("Opção ainda não disponível.")
+        self._request_file()
       else:
         show("Opção inválida.")
 
@@ -104,6 +140,22 @@ class Client:
       return
     show(f"[Você] {text}")
 
+  def _request_file(self):
+    """Pede um arquivo da raiz compartilhada e volta ao menu; a receptora
+    grava o download, então o menu continua disponível durante a
+    transferência."""
+    path = input(FILE_PROMPT)
+    if self._disconnected.is_set():
+      return
+    self._download = Download(path, os.path.join(self._downloads_root, *path.split("/")))
+    try:
+      p.send_message(self._sock, p.FILE_REQUEST, {"path": path})
+    except (p.ProtocolError, OSError) as error:
+      self._download = None
+      show(f"Não foi possível solicitar o arquivo: {error}")
+      return
+    show(f"Arquivo {path} solicitado.")
+
   def _quit(self):
     self._leaving.set()
     try:
@@ -117,6 +169,19 @@ class Client:
     texto parcialmente digitado na linha atual."""
     show("\n" + line)
 
+  def _receive_download(self, message):
+    download = self._download
+    if download is None:
+      return
+    if message.type == p.FILE_META:
+      download.start(message.content["size"])
+    elif message.type == p.FILE_DATA:
+      download.write(message.content)
+    else:
+      download.finish(message.content["sha256"])
+      self._download = None
+      self._show_received(f"Download concluído: {download.path} publicado em {download.destination}")
+
   def _receive_loop(self):
     while True:
       try:
@@ -127,6 +192,8 @@ class Client:
         break
       if message.type == p.CHAT and isinstance(message.content, dict):
         self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
+      elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
+        self._receive_download(message)
     self._disconnected.set()
     if not self._leaving.is_set():
       show("\nDesconectado do servidor. Pressione Enter para sair.")
