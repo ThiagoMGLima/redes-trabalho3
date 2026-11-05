@@ -187,6 +187,38 @@ class SharedRootTest(unittest.TestCase):
     self.assertRefusedKeepingTheSession(paths, p.ACCESS_ERROR)
     self.assertRefusedKeepingTheSession(["trancada/../presente.txt"], p.PATH_FORBIDDEN)
 
+  @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
+  def test_shared_folder_swapped_with_a_link_during_requests_never_serves_a_file_from_outside_the_root(self):
+    """Uma thread troca sem parar a pasta `aulas` por um link para fora da
+    raiz enquanto um cliente pede `aulas/segredo.txt` repetidamente. Cada
+    pedido recebe o arquivo legítimo ou uma recusa, nunca o arquivo de fora
+    da raiz."""
+    share(self.shared_root, "aulas/segredo.txt", b"legitimo")
+    share(self.base, "fora/segredo.txt", b"FORA DA RAIZ")
+    self.link("troca", os.path.join(self.base, "fora"))
+    self.start_server()
+    client = self.connect()
+
+    served = []
+    swapper = Swapper(self.shared("aulas"), self.shared("troca")).start()
+    try:
+      for _ in range(100):
+        client.sendall(p.encode(p.FILE_REQUEST, {"path": "aulas/segredo.txt"}))
+        reply = receive_within(client)
+        if reply.type == p.ERROR:
+          continue
+        self.assertEqual(reply.type, p.FILE_META, reply)
+        blocks = []
+        while (message := receive_within(client)).type == p.FILE_DATA:
+          blocks.append(message.content)
+        self.assertEqual(message.type, p.FILE_END, message)
+        served.append(b"".join(blocks))
+    finally:
+      swapper.stop()
+
+    self.assertNotIn(b"FORA DA RAIZ", served)
+    self.assertEqual(self.log.matching("Desconectado:"), [])
+
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""
