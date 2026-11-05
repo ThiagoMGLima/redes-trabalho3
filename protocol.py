@@ -1,3 +1,10 @@
+"""Protocolo de aplicação sobre a conexão TCP persistente.
+
+Cada mensagem é um frame com cabeçalho de 5 bytes (tipo em 1 byte e
+comprimento do conteúdo em 4 bytes sem sinal, em ordem de rede) seguido do
+conteúdo. Controles são objetos JSON em UTF-8; FILE_DATA leva os bytes
+originais do arquivo. O comprimento conta bytes já codificados.
+"""
 import json
 import select
 import struct
@@ -71,6 +78,11 @@ def decode(msg_type, payload):
 
 
 def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):
+  """Envia o frame inteiro em até `timeout` segundos, prazo total que não é
+  reiniciado por envios parciais; ao expirar, levanta FrameTimeout.
+
+  O socket passa a operar em modo não bloqueante: os prazos são controlados
+  aqui."""
   frame = memoryview(encode(msg_type, content))
   _make_nonblocking(sock)
   deadline = time.monotonic() + timeout
@@ -84,6 +96,15 @@ def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):
 
 
 def receive_message(sock, timeout=RECEIVE_TIMEOUT):
+  """Recebe exatamente um frame e devolve Message(tipo, conteúdo), ou None se
+  o stream terminar entre frames.
+
+  A espera pelo início do frame não tem prazo; depois do primeiro byte,
+  cabeçalho e conteúdo devem chegar em até `timeout` segundos no total.
+  Levanta InvalidFrame (tipo desconhecido, comprimento acima do limite, JSON
+  inválido), IncompleteFrame (stream terminou no meio do frame) ou
+  FrameTimeout. Nunca procura outro cabeçalho para recuperar o alinhamento.
+  O socket passa a operar em modo não bloqueante."""
   _make_nonblocking(sock)
   first = _recv_some(sock, HEADER.size, deadline=None)
   if not first:

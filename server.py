@@ -2,6 +2,7 @@ import argparse
 import queue
 import select
 import socket
+import sys
 import threading
 
 import protocol as p
@@ -221,7 +222,11 @@ def main():
   args = parser.parse_args()
 
   server = Server(HOST, args.port)
-  server.start()
+  try:
+    server.start()
+  except OSError as error:
+    terminal_log(f"Não foi possível escutar na porta TCP {args.port}: {error}")
+    sys.exit(1)
   terminal_log(f"Servidor escutando na porta TCP {server.address[1]}. Ctrl+C encerra.")
   try:
     server.wait()
