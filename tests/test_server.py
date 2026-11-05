@@ -1,5 +1,9 @@
 import gc
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -7,7 +11,9 @@ import weakref
 
 import protocol as p
 from server import Server, Session
-from tests.support import LogRecorder, ThreadErrors, tcp_pair, wait_until
+from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, tcp_pair, wait_until
+
+SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")
 
 
 def address_of(sock):
@@ -73,6 +79,52 @@ class SessionLifecycleTest(ServerTestCase):
     self.assertStillOpen(staying)
     self.assertEqual(len(log.matching(f"Conectado: {address_of(leaving)}")), 1)
     self.assertEqual(len(log.matching(f"Desconectado: {address_of(leaving)}")), 1)
+
+
+class ShutdownTest(ServerTestCase):
+  def test_shutdown_stops_accepting_and_ends_existing_sessions(self):
+    server, log = self.start_server()
+    first = self.connect(server, log)
+    second = self.connect(server, log)
+    address = server.address
+
+    server.shutdown()
+
+    self.assertClosedByServer(first)
+    self.assertClosedByServer(second)
+    for client in (first, second):
+      self.assertIn("servidor encerrado", log.wait_for(f"Desconectado: {address_of(client)}"))
+    with self.assertRaises(ConnectionRefusedError):
+      socket.create_connection(address, timeout=1).close()
+
+
+@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
+class CtrlCTest(unittest.TestCase):
+  def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
+    port = free_port()
+    process = subprocess.Popen(
+      [sys.executable, "-u", SERVER_SCRIPT, str(port)],
+      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    self.addCleanup(process.wait, 5)
+    self.addCleanup(process.kill)
+    output = OutputReader(process.stdout)
+    output.wait_for(str(port))
+    client = socket.create_connection(("127.0.0.1", port), timeout=5)
+    self.addCleanup(client.close)
+    output.wait_for(f"Conectado: {address_of(client)}")
+
+    process.send_signal(signal.SIGINT)
+
+    self.assertEqual(process.wait(5), 0)
+    try:
+      self.assertEqual(client.recv(1), b"")
+    except ConnectionResetError:
+      pass
+    with self.assertRaises(ConnectionRefusedError):
+      socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    output.wait_for(f"Desconectado: {address_of(client)}")
+    self.assertNotIn("Traceback", output.text)
 
 
 class BrokenFrameTest(ServerTestCase):

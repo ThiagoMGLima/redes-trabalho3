@@ -59,3 +59,34 @@ def tcp_pair(small_buffers=False):
     near.connect(listener.getsockname())
     far, _ = listener.accept()
   return near, far
+
+
+def free_port():
+  with socket.create_server(("127.0.0.1", 0)) as probe:
+    return probe.getsockname()[1]
+
+
+class OutputReader:
+  """Acumula a saída de um processo em segundo plano, inclusive prompts sem
+  quebra de linha."""
+
+  def __init__(self, stream):
+    self._stream = stream
+    self._lock = threading.Lock()
+    self._text = ""
+    self._thread = threading.Thread(target=self._read, daemon=True)
+    self._thread.start()
+
+  def _read(self):
+    while chunk := self._stream.read(1):
+      with self._lock:
+        self._text += chunk
+
+  @property
+  def text(self):
+    with self._lock:
+      return self._text
+
+  def wait_for(self, text, timeout=5.0):
+    if not wait_until(lambda: text in self.text, timeout):
+      raise AssertionError(f"{text!r} não apareceu na saída: {self.text!r}")

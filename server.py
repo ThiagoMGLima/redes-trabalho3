@@ -14,6 +14,16 @@ def terminal_log(line):
   print(line, flush=True)
 
 
+def parse_port(text):
+  try:
+    port = int(text)
+  except ValueError:
+    raise argparse.ArgumentTypeError("a porta deve ser um número")
+  if not 1024 < port <= 65535:
+    raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
+  return port
+
+
 class Session:
   """Atendimento de uma conexão aceita.
 
@@ -141,6 +151,12 @@ class Server:
     self._acceptor = threading.Thread(target=self._accept_loop, name="aceitação")
     self._acceptor.start()
 
+  def wait(self):
+    """Bloqueia até o encerramento; acorda periodicamente para que Ctrl+C
+    seja atendido em qualquer plataforma."""
+    while self._acceptor.is_alive():
+      self._acceptor.join(0.5)
+
   def shutdown(self):
     with self._lock:
       if self._stopping:
@@ -190,3 +206,24 @@ class Server:
 
   def _handle_message(self, session, message):
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
+
+
+def main():
+  parser = argparse.ArgumentParser(description="Servidor TCP de chat coletivo e transferência de arquivos")
+  parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
+  args = parser.parse_args()
+
+  server = Server(HOST, args.port)
+  server.start()
+  terminal_log(f"Servidor escutando na porta TCP {server.address[1]}. Ctrl+C encerra.")
+  try:
+    server.wait()
+  except KeyboardInterrupt:
+    terminal_log("Ctrl+C recebido: encerrando o servidor")
+  finally:
+    server.shutdown()
+  terminal_log("Servidor encerrado")
+
+
+if __name__ == "__main__":
+  main()
