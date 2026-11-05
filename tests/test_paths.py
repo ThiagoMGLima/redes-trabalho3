@@ -2,6 +2,7 @@
 downloads no cliente, pela fronteira TCP e com diretórios temporários."""
 import hashlib
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -10,7 +11,8 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.support import (CAN_EXCHANGE, LogRecorder, OutputReader, Swapper, install_programs, receive_within,
+                           wait_until)
 from tests.test_download import CONCLUDED, files_under, share
 
 FORBIDDEN = "Caminho inválido ou proibido"
@@ -258,6 +260,24 @@ class DownloadsRootTest(unittest.TestCase):
       self.server_side.sendall(p.encode(p.FILE_DATA, content))
     self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()}))
 
+  def try_download(self, path, content):
+    """Escolhe Arquivo e informa `path`. Se o pedido chegar ao servidor,
+    serve `content` e espera o resultado anunciado. Devolve None para uma
+    recusa local, True para "Download concluído" e False para falha."""
+    refusals = lambda: self.output.text.count(FORBIDDEN) + self.output.text.count("Download recusado")
+    before = refusals()
+    self.type_line("2")
+    self.type_line(path)
+    sent = lambda: select.select([self.server_side], [], [], 0)[0]
+    self.assertTrue(wait_until(lambda: refusals() > before or sent()), self.output.text)
+    if not sent():
+      return None
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+    self.serve(content)
+    concluded, failed = f"{CONCLUDED}: {path} publicado", f"Download de {path} falhou"
+    self.assertTrue(wait_until(lambda: concluded in self.output.text or failed in self.output.text), self.output.text)
+    return concluded in self.output.text
+
   def assertRefusedLocally(self, paths, refusal):
     """Cada caminho é recusado com `refusal` sem que o pedido seja enviado:
     o primeiro pedido que chega ao servidor é o de um caminho permitido, que
@@ -318,6 +338,75 @@ class DownloadsRootTest(unittest.TestCase):
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["outro.txt"])
     self.assertEqual(os.readlink(self.local("aulas")), self.outside)
+
+  def start_transfer(self, path, content):
+    """Pede `path` e envia FILE_META e o primeiro bloco de `content`; volta
+    quando o temporário já existe na pasta do destino. Devolve o envio do
+    restante e do FILE_END."""
+    folder = os.path.dirname(self.local(path))
+    present = len(os.listdir(folder)) if os.path.isdir(folder) else 0
+    self.request(path)
+    self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
+    self.server_side.sendall(p.encode(p.FILE_DATA, content[:p.CHUNK_SIZE]))
+    self.assertTrue(wait_until(lambda: os.path.isdir(folder) and len(os.listdir(folder)) > present),
+                    "temporário não criado")
+
+    def finish():
+      self.server_side.sendall(p.encode(p.FILE_DATA, content[p.CHUNK_SIZE:]))
+      self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()}))
+    return finish
+
+  def assertSessionContinues(self):
+    """Outro download é pedido e concluído em seguida."""
+    concluded = self.output.text.count(CONCLUDED)
+    self.request("depois.txt")
+    self.serve(b"depois")
+    self.assertTrue(wait_until(lambda: self.output.text.count(CONCLUDED) > concluded), self.output.text)
+    with open(self.local("depois.txt"), "rb") as file:
+      self.assertEqual(file.read(), b"depois")
+
+  def test_link_that_replaces_a_download_folder_during_the_transfer_fails_the_download_publishing_nothing(self):
+    """Com o temporário já criado e antes do FILE_END, a pasta `aulas` é
+    movida e um link para ela toma seu lugar: fora da raiz ou dentro dela.
+    O download falha sem publicar nada através do link nem na pasta movida,
+    o temporário é descartado e a sessão continua."""
+    content = os.urandom(2 * p.CHUNK_SIZE)
+    moves = [("aulas/externo.pdf", os.path.join(self.outside, "aulas")),
+             ("aulas/interno.pdf", self.local("aulas-real"))]
+    for path, moved in moves:
+      os.mkdir(self.local("aulas"))
+      finish = self.start_transfer(path, content)
+      os.rename(self.local("aulas"), moved)
+      self.link("aulas", moved)
+      finish()
+      self.output.wait_for(f"Download de {path} falhou")
+      os.unlink(self.local("aulas"))
+
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertEqual(files_under(self.outside) + files_under(self.local("aulas-real")), [])
+    self.assertSessionContinues()
+
+  @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
+  def test_download_folder_swapped_with_a_link_during_downloads_leaves_nothing_outside_the_root(self):
+    """Uma thread troca sem parar a pasta `aulas` por um link para fora da
+    raiz enquanto downloads em `aulas/2024/` são pedidos e atendidos. Cada
+    um é recusado, falha ou conclui, mas nada é criado fora da raiz: nem
+    pasta, nem temporário, nem arquivo publicado. O que foi anunciado como
+    concluído está no destino, com o conteúdo verificado."""
+    content = b"conteudo verificado"
+    os.mkdir(self.local("aulas"))
+    self.link("troca", self.outside)
+    swapper = Swapper(self.local("aulas"), self.local("troca")).start()
+    try:
+      outcomes = [self.try_download(f"aulas/2024/{number}.bin", content) for number in range(60)]
+    finally:
+      swapper.stop()
+
+    self.assertEqual(os.listdir(self.outside), [])
+    for number, concluded in enumerate(outcomes):
+      if concluded:
+        with open(self.local(f"aulas/2024/{number}.bin"), "rb") as file:
+          self.assertEqual(file.read(), content, number)
 
   def test_object_in_the_place_of_a_download_folder_is_preserved(self):
     """Antes do pedido, a recusa é local; depois dele, o download falha."""

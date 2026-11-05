@@ -1,10 +1,11 @@
 import argparse
+import errno
 import hashlib
 import os
+import secrets
 import socket
 import stat
 import sys
-import tempfile
 import threading
 
 import protocol as p
@@ -62,46 +63,112 @@ def check_destination(root, path):
   não existem são aceitas. Uma falha ao examinar o caminho, como falta de
   permissão, segue como OSError."""
   parts = path.split("/")
-  download_folder(root, parts[:-1])
   destination = os.path.join(root, *parts)
+  folder = open_download_folder(root, parts[:-1])
+  if folder is None:
+    return destination
   try:
-    mode = os.lstat(destination).st_mode
+    mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode
   except FileNotFoundError:
     return destination
+  finally:
+    os.close(folder)
   if stat.S_ISLNK(mode):
     raise p.ForbiddenPath(f"{path} é um link simbólico")
   raise DestinationTaken(f"já existe algo em {destination}; o objeto existente foi preservado")
 
 
-def download_folder(root, names, create=False):
-  """Percorre, sem seguir links, a raiz de downloads `root` e as pastas
-  `names` sob ela, nessa ordem, e devolve a última. Uma pasta que falta é
-  criada quando `create` é verdadeiro; senão, devolve None. Cada pasta,
-  existente ou recém-criada, é examinada antes de passar à seguinte, e a
-  última precisa estar contida na raiz. Levanta p.ForbiddenPath para link
+# Uma pasta é aberta sem seguir links, e o descritor obtido é o ponto de
+# partida da operação seguinte; o caminho não é resolvido de novo pelo nome.
+# O_PATH, onde existe, dispensa a permissão de leitura, como o exame por nome.
+_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
+
+
+def open_download_folder(root, names, create=False):
+  """Abre, sem seguir links, a raiz de downloads `root` e as pastas `names`
+  sob ela, cada uma a partir do descritor da anterior, e devolve o
+  descritor da última, que o chamador fecha. Uma pasta que falta é criada
+  quando `create` é verdadeiro; senão, devolve None. Cada pasta, existente
+  ou recém-criada, é examinada ao ser aberta, antes de passar à seguinte, e
+  a última precisa estar contida na raiz. Um link que surja depois numa
+  pasta já aberta não é seguido. Levanta p.ForbiddenPath para link
   simbólico ou saída da raiz e DestinationTaken se algo que não é pasta
   ocupar o lugar de uma delas; uma falha ao examinar ou criar uma pasta
   segue como OSError."""
-  folder = root
-  for depth in range(len(names) + 1):
-    if depth:
-      folder = os.path.join(folder, names[depth - 1])
-    if create:
+  folder = None
+  try:
+    for depth in range(len(names) + 1):
+      name = names[depth - 1] if depth else root
+      shown = "/".join(names[:depth]) if depth else "a raiz de downloads"
+      if create:
+        try:
+          os.mkdir(name, dir_fd=folder)
+        except FileExistsError:
+          pass
       try:
-        os.mkdir(folder)
-      except FileExistsError:
-        pass
-    try:
-      mode = os.lstat(folder).st_mode
-    except FileNotFoundError:
-      return None
-    if stat.S_ISLNK(mode):
-      where = "/".join(names[:depth]) if depth else "a raiz de downloads"
-      raise p.ForbiddenPath(f"{where} é um link simbólico")
-    if not stat.S_ISDIR(mode):
-      raise DestinationTaken(f"já existe algo em {folder} que não é uma pasta; o objeto existente foi preservado")
-  p.check_inside(root, folder)
+        inner = _open_folder(name, folder, shown, os.path.join(root, *names[:depth]))
+      except FileNotFoundError:
+        if create:
+          raise
+        inner = None
+      if folder is not None:
+        os.close(folder)
+      folder = inner
+      if folder is None:
+        return None
+    p.check_inside(root, os.path.join(root, *names))
+  except BaseException:
+    if folder is not None:
+      os.close(folder)
+    raise
   return folder
+
+
+def _open_folder(name, parent, shown, location):
+  """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
+  completo, sem `parent`), aberta sem seguir links. `shown` e `location`
+  nomeiam a pasta nas recusas."""
+  try:
+    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+  except OSError as error:
+    failure = error
+  try:
+    mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+  except OSError:
+    raise failure from None
+  if stat.S_ISLNK(mode):
+    raise p.ForbiddenPath(f"{shown} é um link simbólico")
+  if not stat.S_ISDIR(mode):
+    raise DestinationTaken(f"já existe algo em {location} que não é uma pasta; o objeto existente foi preservado")
+  raise failure
+
+
+def _identity(status):
+  return status.st_dev, status.st_ino
+
+
+def _create_temporary(folder):
+  """Cria na pasta de descritor `folder` um temporário oculto de nome
+  aleatório, sem nunca abrir um objeto que já exista; devolve o descritor
+  e o nome."""
+  for _ in range(100):
+    name = f".{secrets.token_hex(6)}.parcial"
+    try:
+      return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600,
+                     dir_fd=folder), name
+    except FileExistsError:
+      continue
+  raise FileExistsError(errno.EEXIST, "nenhum nome livre para o temporário")
+
+
+def _failure_reason(error):
+  """Motivo, para o participante, de uma falha ao abrir ou verificar as
+  pastas do destino."""
+  if isinstance(error, p.ForbiddenPath):
+    return f"caminho inválido ou proibido: {error}"
+  if isinstance(error, DestinationTaken):
+    return str(error)
+  return f"não foi possível preparar a pasta de destino ({error.strerror})"
 
 
 class DownloadFailed(Exception):
@@ -111,19 +178,24 @@ class DownloadFailed(Exception):
 class Download:
   """Download ativo, do pedido até a publicação. A receptora grava cada bloco
   recebido em um temporário na pasta do destino e calcula o SHA-256 nos
-  blocos; o destino final só recebe o arquivo verificado."""
+  blocos; o destino final só recebe o arquivo verificado. A pasta do destino
+  é aberta ao começar a transferência, e o temporário e a publicação partem
+  desse descritor, sem resolver o caminho de novo pelo nome."""
 
   def __init__(self, path, destination, downloads_root):
     self.path = path
     self.destination = destination
     self.started = False
     self._downloads_root = downloads_root
+    self._folders = path.split("/")[:-1]
+    self._name = path.split("/")[-1]
     self._failure = None
     self._size = None
     self._received = 0
     self._digest = hashlib.sha256()
+    self._folder = None
     self._temp = None
-    self._temp_path = None
+    self._temp_name = None
 
   def start(self, size):
     """Cria as pastas que faltam sob a raiz de downloads e o temporário. Se
@@ -132,17 +204,11 @@ class Download:
     self.started = True
     self._size = size
     try:
-      folder = download_folder(self._downloads_root, self.path.split("/")[:-1], create=True)
-    except p.ForbiddenPath as error:
-      self._failure = f"caminho inválido ou proibido: {error}"
+      self._folder = open_download_folder(self._downloads_root, self._folders, create=True)
+    except (p.ForbiddenPath, DestinationTaken, OSError) as error:
+      self._failure = _failure_reason(error)
       return
-    except DestinationTaken as error:
-      self._failure = str(error)
-      return
-    except OSError as error:
-      self._failure = f"não foi possível preparar a pasta de destino ({error.strerror})"
-      return
-    descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
+    descriptor, self._temp_name = _create_temporary(self._folder)
     self._temp = os.fdopen(descriptor, "wb")
 
   def write(self, block):
@@ -156,7 +222,9 @@ class Download:
   def finish(self, sha256):
     """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
     FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
-    Levanta DownloadFailed com o motivo; o temporário é sempre removido."""
+    Antes de publicar, confirma que a pasta aberta no começo ainda é a que
+    se alcança a partir da raiz de downloads sem passar por links. Levanta
+    DownloadFailed com o motivo; o temporário é sempre removido."""
     if self._failure is not None:
       raise DownloadFailed(self._failure)
     try:
@@ -165,12 +233,32 @@ class Download:
         raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
       if sha256 != self._digest.hexdigest():
         raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
+      moved = self._folder_moved()
+      if moved is not None:
+        raise DownloadFailed(moved)
       try:
-        os.link(self._temp_path, self.destination)
+        os.link(self._temp_name, self._name, src_dir_fd=self._folder, dst_dir_fd=self._folder,
+                follow_symlinks=False)
       except FileExistsError:
         raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
     finally:
-      os.unlink(self._temp_path)
+      os.unlink(self._temp_name, dir_fd=self._folder)
+      os.close(self._folder)
+
+  def _folder_moved(self):
+    """Motivo pelo qual a pasta aberta no começo deixou de ser a pasta do
+    destino alcançada a partir da raiz sem passar por links, ou None."""
+    try:
+      folder = open_download_folder(self._downloads_root, self._folders)
+    except (p.ForbiddenPath, DestinationTaken, OSError) as error:
+      return _failure_reason(error)
+    if folder is None:
+      return "a pasta de destino deixou de existir durante a transferência"
+    try:
+      same = _identity(os.fstat(folder)) == _identity(os.fstat(self._folder))
+    finally:
+      os.close(folder)
+    return None if same else "a pasta de destino foi trocada durante a transferência"
 
 
 class Client:
