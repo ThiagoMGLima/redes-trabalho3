@@ -2,6 +2,7 @@
 encerramento do servidor, observados pela fronteira TCP."""
 import hashlib
 import os
+import signal
 import socket
 import subprocess
 import struct
@@ -12,7 +13,9 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ThreadErrors, free_port, install_programs, receive_within, wait_until,
+)
 from tests.test_download import CONCLUDED, files_under, share
 from tests.test_server import address_of
 
@@ -390,6 +393,185 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.type_line("1")
     self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
     self.assertExitsAfterEnter()
+
+
+def stalled_download(test, address, path, wait_connected):
+  """Participante que pede um arquivo grande, recebe o FILE_META e o
+  primeiro bloco e deixa de ler: o envio do servidor fica bloqueado no meio
+  da transferência. `wait_connected` espera o registro da conexão."""
+  sock = socket.socket()
+  test.addCleanup(sock.close)
+  sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+  sock.settimeout(5)
+  sock.connect(address)
+  wait_connected(f"Conectado: {address_of(sock)}")
+  sock.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
+  test.assertEqual(receive_within(sock), (p.FILE_META, {"size": BIG_SIZE}))
+  test.assertEqual(receive_within(sock).type, p.FILE_DATA)
+  return sock
+
+
+def read_until_closed(sock):
+  """Lê o que o servidor já havia enviado até o fim da conexão; um reset
+  também é fim."""
+  try:
+    while sock.recv(65536):
+      pass
+  except ConnectionResetError:
+    pass
+
+
+@unittest.skipUnless(os.path.isdir("/proc/self/fd"), "observa os arquivos abertos pelo servidor em /proc/self/fd")
+class ServerInterruptionTest(unittest.TestCase):
+  """Servidor real com raiz compartilhada temporária e prazo de envio longo:
+  um envio bloqueado só termina se for interrompido. Os participantes se
+  conectam diretamente por TCP."""
+
+  def setUp(self):
+    thread_errors = ThreadErrors(self)
+    self.addCleanup(lambda: self.assertEqual(thread_errors.errors, []))
+    self.threads_before = set(threading.enumerate())
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.shared_root = base.name
+
+  def start_server(self):
+    self.log = LogRecorder()
+    self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, send_timeout=60)
+    self.server.start()
+    self.addCleanup(self.server.shutdown)
+
+  def connect(self):
+    sock = socket.create_connection(self.server.address, timeout=5)
+    self.addCleanup(sock.close)
+    self.log.wait_for(f"Conectado: {address_of(sock)}")
+    return sock
+
+  def stalled_download(self, path):
+    """Devolve o participante parado e o caminho do arquivo no servidor,
+    que está aberto para o envio."""
+    shared = share_sparse(self.shared_root, path, BIG_SIZE)
+    sock = stalled_download(self, self.server.address, path, self.log.wait_for)
+    self.assertTrue(is_open_here(shared))
+    return sock, shared
+
+  def assertNoThreadLeft(self):
+    self.assertEqual(set(threading.enumerate()) - self.threads_before, set())
+
+  def test_shutdown_with_active_downloads_interrupts_them_without_waiting(self):
+    self.start_server()
+    downloads = [self.stalled_download(f"grande {number}.bin") for number in (1, 2)]
+    address = self.server.address
+
+    self.server.shutdown()
+
+    for sock, shared in downloads:
+      self.assertFalse(is_open_here(shared))
+      self.assertIn("servidor encerrado", self.log.wait_for(f"Desconectado: {address_of(sock)}"))
+      read_until_closed(sock)
+    self.assertNoThreadLeft()
+    with self.assertRaises(ConnectionRefusedError):
+      socket.create_connection(address, timeout=1).close()
+
+  def test_quit_and_a_reset_during_a_download_clean_up_once_and_free_the_session(self):
+    """O QUIT chega à thread de atendimento enquanto a escritora, bloqueada
+    no meio do arquivo, falha com o reset; um chat de outro participante é
+    encaminhado ao mesmo tempo. As sessões encerradas não ocupam vagas nem
+    recebem encaminhamentos: depois delas, nove participantes novos cabem
+    no limite de dez e recebem o chat."""
+    self.start_server()
+    other = self.connect()
+    for attempt in range(5):
+      with self.subTest(attempt=attempt):
+        sock, shared = self.stalled_download(f"grande {attempt}.bin")
+        name = address_of(sock)
+
+        other.sendall(p.encode(p.CHAT, {"text": f"durante a saída {attempt}"}))
+        sock.sendall(p.encode(p.QUIT, {}))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+
+        self.log.wait_for(f"Desconectado: {name}")
+        self.assertTrue(wait_until(lambda: not is_open_here(shared)), "o servidor não liberou o arquivo")
+        self.log.wait_for(f"durante a saída {attempt}")
+
+    newcomers = [self.connect() for _ in range(9)]
+    other.sendall(p.encode(p.CHAT, {"text": "todos aqui"}))
+    for newcomer in newcomers:
+      self.assertEqual(receive_within(newcomer).content["text"], "todos aqui")
+    self.assertEqual(self.log.matching("Recusado:"), [])
+    self.assertEqual(len(self.log.matching("Desconectado:")), 5)
+
+  def test_shutdown_racing_with_quit_during_a_download_cleans_up_once(self):
+    for attempt in range(3):
+      with self.subTest(attempt=attempt):
+        self.start_server()
+        sock, shared = self.stalled_download("grande.bin")
+        name = address_of(sock)
+        barrier = threading.Barrier(2)
+
+        def leave():
+          barrier.wait()
+          try:
+            sock.sendall(p.encode(p.QUIT, {}))
+          except OSError:
+            pass
+        leaving = threading.Thread(target=leave)
+        leaving.start()
+        barrier.wait()
+        self.server.shutdown()
+        leaving.join()
+
+        self.assertEqual(len(self.log.matching(f"Desconectado: {name}")), 1)
+        self.assertFalse(is_open_here(shared))
+        read_until_closed(sock)
+        self.assertNoThreadLeft()
+
+
+@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
+class ServerProcessInterruptionTest(unittest.TestCase):
+  """O servidor roda como no terminal, a partir de uma cópia do programa com
+  um arquivo grande em files/; a entrada padrão é a do operador."""
+
+  def start_server_process(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    program = install_programs(os.path.join(base.name, "servidor"))
+    share_sparse(os.path.join(program, "files"), "grande.bin", BIG_SIZE)
+    port = free_port()
+    process = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "server.py"), str(port)],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    output = OutputReader(process.stdout)
+    self.addCleanup(output.close)
+    self.addCleanup(process.wait, 5)
+    self.addCleanup(process.kill)
+    self.addCleanup(process.stdin.close)
+    output.wait_for(str(port))
+    return process, output, port
+
+  def test_eof_or_ctrl_c_with_an_active_download_ends_the_server_without_waiting_for_the_transfer(self):
+    """Se o servidor esperasse a transferência, a sessão só terminaria pelo
+    prazo de envio, e não pelo encerramento."""
+    stops = {"EOF": lambda process: process.stdin.close(), "Ctrl+C": lambda process: process.send_signal(signal.SIGINT)}
+    for stop_name, stop in stops.items():
+      with self.subTest(stop_name):
+        process, output, port = self.start_server_process()
+        sock = stalled_download(self, ("127.0.0.1", port), "grande.bin", output.wait_for)
+        name = address_of(sock)
+
+        stop(process)
+
+        self.assertEqual(process.wait(5), 0)
+        output.wait_for(f"Desconectado: {name}")
+        [line] = [line for line in output.text.splitlines() if f"Desconectado: {name}" in line]
+        self.assertIn("servidor encerrado", line)
+        read_until_closed(sock)
+        with self.assertRaises(ConnectionRefusedError):
+          socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        self.assertNotIn("Traceback", output.text)
 
 
 if __name__ == "__main__":
