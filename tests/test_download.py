@@ -25,6 +25,14 @@ def sha256_of(path):
   return digest.hexdigest()
 
 
+def files_under(root):
+  """Caminhos relativos, com `/`, de todos os arquivos sob `root`."""
+  return sorted(
+    os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
+    for folder, _, names in os.walk(root) for name in names
+  )
+
+
 def share(root, path, content):
   """Coloca um arquivo sob `root` e devolve seu SHA-256."""
   full = os.path.join(root, *path.split("/"))
@@ -229,6 +237,20 @@ class ClientDownloadTest(unittest.TestCase):
     self.download("presente.txt")
     self.assertEqual(os.listdir(self.downloads_root), ["presente.txt"])
     self.assertEqual(self.log.matching("Desconectado:"), [])
+
+  def test_files_with_any_name_are_published_preserving_their_subfolders(self):
+    names = [
+      "aulas/Revisão 2.pdf", "aulas/2024/notas finais da ação.txt", ".exemplo", "arquivo", "teste.bin",
+      "dados.tar.gz", "pasta com espaço/.oculto sem extensão",
+    ]
+    shas = {name: share(self.shared_root, name, os.urandom(1000 + number)) for number, name in enumerate(names)}
+
+    for name in names:
+      self.download(name)
+
+    self.assertEqual(files_under(self.downloads_root), sorted(names))
+    for name in names:
+      self.assertEqual(sha256_of(self.downloaded(name)), shas[name], name)
 
 
 if __name__ == "__main__":
