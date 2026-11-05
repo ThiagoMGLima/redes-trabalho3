@@ -9,6 +9,7 @@ import json
 import select
 import struct
 import time
+import unicodedata
 from collections import namedtuple
 
 
@@ -37,6 +38,10 @@ CHUNK_SIZE = 8 * 1024
 SEND_TIMEOUT = 5.0
 RECEIVE_TIMEOUT = 10.0
 
+MAX_CHAT_BYTES = 1024
+
+INVALID_CHAT = "INVALID_CHAT"
+
 Message = namedtuple("Message", "type content")
 
 
@@ -54,6 +59,10 @@ class IncompleteFrame(ProtocolError):
 
 class FrameTimeout(ProtocolError):
   pass
+
+
+class InvalidChatText(ValueError):
+  """Texto recusado pelas regras do chat coletivo; a mensagem traz o motivo."""
 
 
 def encode(msg_type, content):
@@ -75,6 +84,25 @@ def decode(msg_type, payload):
     return json.loads(payload.decode("utf-8"))
   except (UnicodeDecodeError, ValueError, RecursionError) as error:
     raise InvalidFrame(f"JSON inválido em {TYPE_NAMES[msg_type]}: {error}") from None
+
+
+def check_chat_text(text):
+  """Aceita de 1 a MAX_CHAT_BYTES bytes de texto UTF-8 em uma única linha,
+  preservado como veio. Levanta InvalidChatText para texto vazio, somente
+  espaços, com caracteres de controle ou quebra de linha, acima do limite ou
+  que não possa ser codificado em UTF-8; nunca trunca."""
+  try:
+    size = len(text.encode("utf-8"))
+  except UnicodeEncodeError:
+    raise InvalidChatText("o texto não pode ser codificado em UTF-8") from None
+  if not text:
+    raise InvalidChatText("a mensagem está vazia")
+  if text.isspace():
+    raise InvalidChatText("a mensagem contém somente espaços")
+  if size > MAX_CHAT_BYTES:
+    raise InvalidChatText(f"a mensagem tem {size} bytes; o limite é {MAX_CHAT_BYTES}")
+  if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in text):
+    raise InvalidChatText("a mensagem contém caracteres de controle ou quebra de linha")
 
 
 def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):

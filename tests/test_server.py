@@ -256,6 +256,41 @@ class ChatTest(ServerTestCase):
     log.wait_for("[Cliente 1] sou o servidor")
     self.assertEqual(log.matching("[Servidor]"), [])
 
+  def assertRefusedKeepingTheSession(self, frames, code):
+    """Cada frame recebe ERROR com `code`; nada é encaminhado e a sessão
+    continua: a próxima mensagem válida é a primeira que o outro recebe."""
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    for frame in frames:
+      sender.sendall(frame)
+      error = receive_within(sender)
+      self.assertEqual(error.type, p.ERROR)
+      self.assertEqual((error.content["operation"], error.content["code"]), ("CHAT", code))
+      self.assertTrue(error.content["message"])
+    self.chat(sender, {"text": "válida"})
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "válida"}))
+    self.assertEqual(log.matching("Desconectado:"), [])
+
+  def test_refused_text_gets_invalid_chat_and_the_session_is_kept(self):
+    refused = [
+      "",
+      "   ",
+      "com\ttabulação",
+      "linha 1\nlinha 2",
+      "linha 1 linha 2",
+      "escape \x1b[31m",
+      "😀" * 256 + "a",
+      "a" * 1023 + "é",
+    ]
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], "INVALID_CHAT")
+
+  def test_text_that_cannot_be_encoded_as_utf8_gets_invalid_chat(self):
+    payload = b'{"text": "\\ud800"}'
+    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
+
 
 class Content(dict):
   """Conteúdo de controle que pode ser observado por referência fraca."""

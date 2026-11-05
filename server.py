@@ -218,9 +218,18 @@ class Server:
 
   def _handle_message(self, session, message):
     if message.type == p.CHAT:
-      self._forward_chat(session, message.content["text"])
+      self._receive_chat(session, message.content)
       return
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
+
+  def _receive_chat(self, session, content):
+    text = content["text"]
+    try:
+      p.check_chat_text(text)
+    except p.InvalidChatText as error:
+      session.send(p.ERROR, {"operation": "CHAT", "code": p.INVALID_CHAT, "message": str(error)})
+      return
+    self._forward_chat(session, text)
 
   def _forward_chat(self, sender, text):
     """Exibe no terminal e encaminha aos demais clientes, com a origem
