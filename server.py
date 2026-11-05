@@ -146,7 +146,8 @@ class Server:
     self._receive_timeout = receive_timeout
     self._log = log
     self._lock = threading.Lock()
-    self._sessions = set()
+    self._sessions = {}
+    self._last_client_number = 0
     self._stopping = False
 
   @property
@@ -193,27 +194,42 @@ class Server:
         continue
       self._open_session(sock, f"{address[0]}:{address[1]}")
 
-  def _open_session(self, sock, name):
+  def _open_session(self, sock, address):
+    with self._lock:
+      self._last_client_number += 1
+      client_id = f"Cliente {self._last_client_number}"
     session = Session(
       sock,
-      name,
+      client_id,
       send_timeout=self._send_timeout,
       receive_timeout=self._receive_timeout,
       on_message=self._handle_message,
       on_close=self._end_session,
     )
     with self._lock:
-      self._sessions.add(session)
-    self._log(f"Conectado: {name}")
+      self._sessions[session] = address
+    self._log(f"Conectado: {address} como {client_id}")
     session.start()
 
   def _end_session(self, session, reason):
     with self._lock:
-      self._sessions.discard(session)
-    self._log(f"Desconectado: {session.name} ({reason})")
+      address = self._sessions.pop(session)
+    self._log(f"Desconectado: {address} como {session.name} ({reason})")
 
   def _handle_message(self, session, message):
+    if message.type == p.CHAT:
+      self._forward_chat(session, message.content["text"])
+      return
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
+
+  def _forward_chat(self, sender, text):
+    """Exibe no terminal e encaminha aos demais clientes, com a origem
+    atribuída pelo servidor à sessão remetente."""
+    self._log(f"[{sender.name}] {text}")
+    with self._lock:
+      recipients = [session for session in self._sessions if session is not sender]
+    for session in recipients:
+      session.send(p.CHAT, {"origin": sender.name, "text": text})
 
 
 def main():

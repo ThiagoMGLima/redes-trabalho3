@@ -11,7 +11,7 @@ import weakref
 
 import protocol as p
 from server import Server, Session
-from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, tcp_pair, wait_until
+from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, receive_within, tcp_pair, wait_until
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")
 
@@ -206,6 +206,25 @@ class DeadlineTest(ServerTestCase):
     self.assertEqual(log.matching(f"Desconectado: {address_of(client)}"), [])
     client.sendall(p.encode(p.QUIT, {}))
     self.assertClosedByServer(client)
+
+
+class ChatTest(ServerTestCase):
+  def chat(self, sock, content):
+    sock.sendall(p.encode(p.CHAT, content))
+
+  def test_client_chat_reaches_the_server_terminal_and_the_other_clients_without_echo(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    first = self.connect(server, log)
+    second = self.connect(server, log)
+
+    self.chat(sender, {"text": "olá, turma"})
+
+    expected = (p.CHAT, {"origin": "Cliente 1", "text": "olá, turma"})
+    self.assertEqual(receive_within(first), expected)
+    self.assertEqual(receive_within(second), expected)
+    log.wait_for("[Cliente 1] olá, turma")
+    self.assertStillOpen(sender)
 
 
 class Content(dict):

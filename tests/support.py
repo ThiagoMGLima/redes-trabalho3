@@ -1,6 +1,17 @@
+import select
 import socket
 import threading
 import time
+
+import protocol as p
+
+
+def receive_within(sock, timeout=5.0):
+  """Recebe o próximo frame, falhando se nenhum começar a chegar a tempo."""
+  readable, _, _ = select.select([sock], [], [], timeout)
+  if not readable:
+    raise AssertionError(f"nenhuma mensagem recebida em {timeout} s")
+  return p.receive_message(sock, timeout)
 
 
 def wait_until(predicate, timeout=5.0, interval=0.01):
