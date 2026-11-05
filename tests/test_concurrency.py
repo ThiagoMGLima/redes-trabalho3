@@ -46,9 +46,8 @@ class ServerConcurrencyTest(unittest.TestCase):
     return sock
 
   def share_large(self, path):
-    """Arquivo de 12 MiB: devolve o conteúdo e seu SHA-256."""
-    content = os.urandom(SIZE_12_MIB)
-    return content, share(self.shared_root, path, content)
+    """Compartilha um arquivo de 12 MiB e devolve seu SHA-256."""
+    return share(self.shared_root, path, os.urandom(SIZE_12_MIB))
 
   def receive_through(self, sock, download, last_type):
     """Lê até uma mensagem do tipo `last_type`, inclusive, juntando os blocos
@@ -76,26 +75,75 @@ class ServerConcurrencyTest(unittest.TestCase):
     end = self.receive_through(sock, download, p.FILE_END)
     return b"".join(download["blocks"]), end.content["sha256"]
 
+  def start_held_download(self, path):
+    """Participante que pede `path`, recebe FILE_META e um bloco e para de
+    ler: o download fica ativo, preso no meio, até o teste voltar a ler."""
+    sock = self.connect(small_receive_buffer=True)
+    sock.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
+    return sock, self.receive_meta_and_a_block(sock)
+
+  def assertIntact(self, finished, origin_sha256):
+    """Tamanho e SHA-256 dos bytes recebidos iguais aos da origem, e o hash
+    anunciado no FILE_END igual ao da origem."""
+    received, announced = finished
+    self.assertEqual(len(received), SIZE_12_MIB)
+    self.assertEqual(hashlib.sha256(received).hexdigest(), origin_sha256)
+    self.assertEqual(announced, origin_sha256)
+
+  def test_two_clients_download_at_the_same_time_and_both_files_arrive_intact(self):
+    """Os dois downloads ficam ativos e presos no meio ao mesmo tempo. O
+    segundo termina enquanto o primeiro continua preso, e depois o primeiro
+    também termina."""
+    first_sha256 = self.share_large("primeiro.bin")
+    second_sha256 = self.share_large("segundo.bin")
+    first, first_download = self.start_held_download("primeiro.bin")
+    second, second_download = self.start_held_download("segundo.bin")
+
+    self.assertIntact(self.finish_download(second, second_download), second_sha256)
+    self.assertIntact(self.finish_download(first, first_download), first_sha256)
+    self.assertEqual(first_download["others"] + second_download["others"], [])
+
+  def test_chat_and_broadcast_sent_during_the_transfers_arrive_before_each_file_end(self):
+    """Com os dois downloads presos no meio, cada participante conversa
+    durante o próprio download e o operador envia um broadcast; cada um
+    recebe o chat do outro e o broadcast antes do próprio FILE_END."""
+    first_sha256 = self.share_large("primeiro.bin")
+    second_sha256 = self.share_large("segundo.bin")
+    first, first_download = self.start_held_download("primeiro.bin")
+    second, second_download = self.start_held_download("segundo.bin")
+
+    first.sendall(p.encode(p.CHAT, {"text": "baixando o primeiro 😀"}))
+    second.sendall(p.encode(p.CHAT, {"text": "baixando o segundo"}))
+    self.log.wait_for("[Cliente 1] baixando o primeiro 😀")
+    self.log.wait_for("[Cliente 2] baixando o segundo")
+    self.server.broadcast("aviso durante os downloads")
+
+    self.assertIntact(self.finish_download(first, first_download), first_sha256)
+    self.assertIntact(self.finish_download(second, second_download), second_sha256)
+    broadcast = (p.CHAT, {"origin": "Servidor", "text": "aviso durante os downloads"})
+    self.assertCountEqual(first_download["others"],
+                          [(p.CHAT, {"origin": "Cliente 2", "text": "baixando o segundo"}), broadcast])
+    self.assertCountEqual(second_download["others"],
+                          [(p.CHAT, {"origin": "Cliente 1", "text": "baixando o primeiro 😀"}), broadcast])
+
   def test_overlapping_requests_get_busy_and_the_current_download_arrives_intact(self):
     """Um pedido colado ao primeiro, antes do FILE_META, e outro no meio da
     transferência recebem BUSY; o download atual chega íntegro e, depois do
     FILE_END, a sessão aceita um novo pedido."""
-    original, sha256 = self.share_large("grande.bin")
+    sha256 = self.share_large("grande.bin")
     outro_sha256 = share(self.shared_root, "outro.txt", b"outro")
     client = self.connect(small_receive_buffer=True)
 
     client.sendall(p.encode(p.FILE_REQUEST, {"path": "grande.bin"}) + p.encode(p.FILE_REQUEST, {"path": "outro.txt"}))
     download = self.receive_meta_and_a_block(client)
     client.sendall(p.encode(p.FILE_REQUEST, {"path": "outro.txt"}))
-    received, announced = self.finish_download(client, download)
+    finished = self.finish_download(client, download)
 
     others = download["others"]
     self.assertEqual([(m.type, m.content["operation"], m.content["code"]) for m in others],
                      [(p.ERROR, "FILE_REQUEST", "BUSY")] * 2)
     self.assertTrue(all(m.content["message"] for m in others))
-    self.assertEqual(len(received), SIZE_12_MIB)
-    self.assertEqual(received, original)
-    self.assertEqual(announced, sha256)
+    self.assertIntact(finished, sha256)
 
     client.sendall(p.encode(p.FILE_REQUEST, {"path": "outro.txt"}))
     second = self.receive_meta_and_a_block(client, size=5)
