@@ -14,6 +14,7 @@ Menu:
   2 - Arquivo
   3 - Chat"""
 PROMPT = "Escolha uma opção: "
+CHAT_PROMPT = "Mensagem: "
 OPTIONS = {
   "1": "sair", "sair": "sair",
   "2": "arquivo", "arquivo": "arquivo",
@@ -49,6 +50,9 @@ class Client:
     self._receiver.start()
     try:
       self._menu_loop()
+    except EOFError:
+      if not self._disconnected.is_set():
+        self._quit()
     finally:
       self._leaving.set()
       try:
@@ -59,22 +63,35 @@ class Client:
       self._sock.close()
 
   def _menu_loop(self):
+    """Fim da entrada (EOF) em qualquer pergunta equivale a Sair."""
     while not self._disconnected.is_set():
       show(MENU)
-      try:
-        choice = input(PROMPT).strip().lower()
-      except EOFError:
-        choice = "sair"
+      choice = input(PROMPT).strip().lower()
       if self._disconnected.is_set():
         return
       option = OPTIONS.get(choice)
       if option == "sair":
         self._quit()
         return
-      if option in ("arquivo", "chat"):
+      if option == "chat":
+        self._chat()
+      elif option == "arquivo":
         show("Opção ainda não disponível.")
       else:
         show("Opção inválida.")
+
+  def _chat(self):
+    """Envia uma única mensagem ao chat coletivo e volta ao menu. A
+    confirmação [Você] indica o envio, não a entrega aos demais."""
+    text = input(CHAT_PROMPT)
+    if self._disconnected.is_set():
+      return
+    try:
+      p.send_message(self._sock, p.CHAT, {"text": text})
+    except (p.ProtocolError, OSError) as error:
+      show(f"Não foi possível enviar a mensagem: {error}")
+      return
+    show(f"[Você] {text}")
 
   def _quit(self):
     self._leaving.set()
