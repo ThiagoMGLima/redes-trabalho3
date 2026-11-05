@@ -47,20 +47,28 @@ def parse_port(text):
   return port
 
 
+class DownloadFailed(Exception):
+  """Download não publicado; a mensagem traz o motivo."""
+
+
 class Download:
   """Download ativo, do pedido até a publicação. A receptora grava cada bloco
-  recebido em um temporário na pasta do destino; o destino final só recebe o
-  arquivo publicado."""
+  recebido em um temporário na pasta do destino e calcula o SHA-256 nos
+  blocos; o destino final só recebe o arquivo verificado."""
 
   def __init__(self, path, destination):
     self.path = path
     self.destination = destination
     self.started = False
+    self._size = None
+    self._received = 0
+    self._digest = hashlib.sha256()
     self._temp = None
     self._temp_path = None
 
   def start(self, size):
     self.started = True
+    self._size = size
     folder = os.path.dirname(self.destination)
     os.makedirs(folder, exist_ok=True)
     descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
@@ -68,12 +76,23 @@ class Download:
 
   def write(self, block):
     self._temp.write(block)
+    self._digest.update(block)
+    self._received += len(block)
 
   def finish(self, sha256):
-    """Fecha o temporário e o publica no destino sem sobrescrever."""
-    self._temp.close()
+    """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
+    FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
+    Levanta DownloadFailed com o motivo; o temporário é sempre removido."""
     try:
-      os.link(self._temp_path, self.destination)
+      self._temp.close()
+      if self._received != self._size:
+        raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
+      if sha256 != self._digest.hexdigest():
+        raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
+      try:
+        os.link(self._temp_path, self.destination)
+      except FileExistsError:
+        raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
     finally:
       os.unlink(self._temp_path)
 
@@ -187,14 +206,20 @@ class Client:
     download = self._download
     if download is None:
       return
+    fields = message.content if isinstance(message.content, dict) else {}
     if message.type == p.FILE_META:
-      download.start(message.content["size"])
+      download.start(fields.get("size"))
     elif message.type == p.FILE_DATA:
       download.write(message.content)
     else:
-      download.finish(message.content["sha256"])
+      try:
+        download.finish(fields.get("sha256"))
+      except DownloadFailed as error:
+        outcome = f"Download de {download.path} falhou: {error}. Nada foi publicado."
+      else:
+        outcome = f"Download concluído: {download.path} publicado em {download.destination}"
       self._download = None
-      self._show_received(f"Download concluído: {download.path} publicado em {download.destination}")
+      self._show_received(outcome)
 
   def _receive_loop(self):
     while True:

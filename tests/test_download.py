@@ -280,5 +280,78 @@ class ClientDownloadTest(unittest.TestCase):
     self.assertEqual(os.listdir(self.downloaded("pasta")), ["dentro"])
 
 
+
+class ScriptedServerDownloadTest(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
+  teste faz o papel do servidor na conexão TCP local, controlando o que é
+  enviado e quando."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    program = install_programs(os.path.join(base.name, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    self.addCleanup(listener.close)
+    listener.settimeout(5)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+    self.server_side, _ = listener.accept()
+    self.addCleanup(self.server_side.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def downloaded(self, path):
+    return os.path.join(self.downloads_root, *path.split("/"))
+
+  def request(self, path):
+    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
+    self.type_line("2")
+    self.type_line(path)
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+
+  def send(self, msg_type, content):
+    self.server_side.sendall(p.encode(msg_type, content))
+
+  def serve(self, size, blocks, sha256):
+    self.send(p.FILE_META, {"size": size})
+    for block in blocks:
+      self.send(p.FILE_DATA, block)
+    self.send(p.FILE_END, {"sha256": sha256})
+
+  def test_size_or_hash_mismatch_discards_the_temporary_file_and_publishes_nothing(self):
+    abc = hashlib.sha256(b"abc").hexdigest()
+    mismatches = [
+      ("faltando.bin", 4, [b"abc"], abc),
+      ("sobrando.bin", 2, [b"abc"], abc),
+      ("hash.bin", 3, [b"abc"], hashlib.sha256(b"abd").hexdigest()),
+      ("aulas/hash invalido.bin", 3, [b"abc"], "nao e um hash"),
+    ]
+
+    for path, size, blocks, sha256 in mismatches:
+      self.request(path)
+      self.serve(size, blocks, sha256)
+      self.output.wait_for(f"Download de {path} falhou")
+
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.request("certo.bin")
+    self.serve(3, [b"abc"], abc)
+    self.output.wait_for(CONCLUDED)
+    self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
+
+
 if __name__ == "__main__":
   unittest.main()
