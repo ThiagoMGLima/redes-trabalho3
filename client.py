@@ -169,6 +169,11 @@ class Client:
     path = input(FILE_PROMPT)
     if self._disconnected.is_set():
       return
+    try:
+      p.check_relative_path(path)
+    except p.ForbiddenPath as error:
+      show(f"Caminho inválido ou proibido: {error}")
+      return
     destination = os.path.join(self._downloads_root, *path.split("/"))
     if os.path.lexists(destination):
       show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")

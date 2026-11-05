@@ -372,6 +372,18 @@ class ScriptedServerDownloadTest(unittest.TestCase):
     with open(self.downloaded("grande.bin"), "rb") as file:
       self.assertEqual(file.read(), content)
 
+  def test_forbidden_path_is_refused_locally_without_sending_the_request(self):
+    forbidden = ["", "../client.py", "aulas/../x.txt", "/etc/passwd", "aulas//x.txt", "C:\\x.txt"]
+
+    for path in forbidden:
+      self.type_line("2")
+      self.type_line(path)
+    self.request("permitido.txt")
+
+    refusals = lambda: self.output.text.count("Caminho inválido ou proibido")
+    self.assertTrue(wait_until(lambda: refusals() == len(forbidden)), self.output.text)
+    self.assertNotIn("já existe", self.output.text)
+
   def test_size_or_hash_mismatch_discards_the_temporary_file_and_publishes_nothing(self):
     abc = hashlib.sha256(b"abc").hexdigest()
     mismatches = [
