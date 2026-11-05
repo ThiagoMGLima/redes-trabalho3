@@ -43,7 +43,8 @@ class ContainmentTest(unittest.TestCase):
 class SharedRootTest(unittest.TestCase):
   """Pedidos a um servidor real cuja raiz compartilhada, `files/`, fica em um
   diretório temporário ao lado de uma pasta irmã de nome parecido,
-  `files-outro/`, que não é compartilhada."""
+  `files-outro/`, que não é compartilhada. A raiz sempre tem o arquivo
+  regular `presente.txt`."""
 
   def setUp(self):
     base = tempfile.TemporaryDirectory()
@@ -51,6 +52,7 @@ class SharedRootTest(unittest.TestCase):
     self.base = base.name
     self.shared_root = os.path.join(self.base, "files")
     os.mkdir(self.shared_root)
+    share(self.shared_root, "presente.txt", b"presente")
     self.sibling = os.path.join(self.base, "files-outro")
     share(self.sibling, "segredo.txt", b"segredo da pasta irma")
     self.log = LogRecorder()
@@ -100,8 +102,26 @@ class SharedRootTest(unittest.TestCase):
       self.assertEqual(self.receive_whole_file(client), file.read())
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_examples_of_the_path_policy_are_accepted_or_forbidden_as_agreed(self):
+    """Exemplos da resolução da #3: os aceitos são baixados; os proibidos
+    recebem PATH_FORBIDDEN mesmo quando o alvo existe ou não existe."""
+    accepted = {"aulas/Revisão 2.pdf": b"revisao", ".exemplo": b"oculto", "arquivo": b"sem extensao",
+                "teste.bin": bytes(range(256))}
+    for path, content in accepted.items():
+      share(self.shared_root, path, content)
+    share(self.shared_root, "resumo.pdf", b"resumo")
+    share(self.base, "segredo.txt", b"fora da raiz")
+    forbidden = ["../../segredo.txt", "../segredo.txt", "aulas/../resumo.pdf", "/etc/passwd", "C:/dados/a.txt",
+                 "C:\\dados\\a.txt", "", "./arquivo", "aulas//resumo.pdf", "aulas/", "arquivo\x00", "arq\nuivo"]
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession(forbidden, p.PATH_FORBIDDEN)
+    client = self.connect()
+    for path, content in accepted.items():
+      client.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
+      self.assertEqual(self.receive_whole_file(client), content, path)
+
   def test_symbolic_link_as_the_file_is_forbidden_wherever_it_points(self):
-    share(self.shared_root, "presente.txt", b"presente")
     share(self.shared_root, "aulas/resumo.pdf", b"resumo")
     self.link("interno.txt", "presente.txt")
     self.link("aulas/interno.pdf", os.path.join(self.shared_root, "aulas", "resumo.pdf"))
@@ -117,7 +137,6 @@ class SharedRootTest(unittest.TestCase):
     """Um link usado como pasta é proibido mesmo que leve a um arquivo
     existente, inclusive na pasta irmã de nome parecido, ou que não leve a
     nada: a proibição vem antes de classificar o arquivo como ausente."""
-    share(self.shared_root, "presente.txt", b"presente")
     share(self.shared_root, "aulas/2024/resumo.pdf", b"resumo")
     self.link("atalho", "aulas")
     self.link("aulas/ano", os.path.join(self.shared_root, "aulas", "2024"))
@@ -133,7 +152,6 @@ class SharedRootTest(unittest.TestCase):
   @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(socket, "AF_UNIX"), "requer FIFO e socket Unix")
   def test_folder_fifo_and_other_non_regular_objects_get_not_regular(self):
     """Nenhum deles é aberto: um FIFO sem escritor não bloqueia a sessão."""
-    share(self.shared_root, "presente.txt", b"presente")
     share(self.shared_root, "aulas/resumo.pdf", b"resumo")
     os.mkdir(self.shared("vazia"))
     os.mkfifo(self.shared("canal"))
@@ -151,7 +169,6 @@ class SharedRootTest(unittest.TestCase):
     """Sem permissão para ler o arquivo ou para atravessar a pasta, o pedido
     recebe ACCESS_ERROR, mesmo que o arquivo atrás da pasta não exista; uma
     proibição de sintaxe continua sendo PATH_FORBIDDEN."""
-    share(self.shared_root, "presente.txt", b"presente")
     share(self.shared_root, "fechado.txt", b"sem leitura")
     share(self.shared_root, "trancada/dentro.txt", b"atras da pasta")
     os.chmod(self.shared("fechado.txt"), 0)
@@ -166,7 +183,6 @@ class SharedRootTest(unittest.TestCase):
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""
-    share(self.shared_root, "presente.txt", b"presente")
     linked_root = os.path.join(self.base, "files-link")
     os.symlink(self.shared_root, linked_root)
     self.start_server(shared_root=linked_root)
