@@ -65,19 +65,30 @@ class ServerDownloadTest(unittest.TestCase):
     self.assertEqual(message.type, p.FILE_END, message)
     return size, blocks, message.content["sha256"]
 
-  def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
+  def assertRefusedKeepingTheSession(self, contents, code):
+    """Cada pedido recebe ERROR com `code` e a sessão continua aceitando
+    operações: um arquivo existente é baixado em seguida."""
+    sha256 = self.share("presente.txt", b"presente")
     client = self.connect()
-    other = self.connect()
 
-    self.request(client, "ausente.txt")
+    for content in contents:
+      client.sendall(p.encode(p.FILE_REQUEST, content))
+      error = receive_within(client)
+      self.assertEqual(error.type, p.ERROR, error)
+      self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code))
+      self.assertTrue(error.content["message"])
+    self.request(client, "presente.txt")
 
-    error = receive_within(client)
-    self.assertEqual(error.type, p.ERROR)
-    self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", "NOT_FOUND"))
-    self.assertTrue(error.content["message"])
-    client.sendall(p.encode(p.CHAT, {"text": "ainda aqui"}))
-    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "ainda aqui"}))
+    self.assertEqual(self.receive_download(client), (8, [b"presente"], sha256))
     self.assertEqual(self.log.matching("Desconectado:"), [])
+
+  def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
+    self.assertRefusedKeepingTheSession([{"path": "ausente.txt"}, {"path": "pasta/ausente.txt"}], "NOT_FOUND")
+
+  def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
+    contents = [{}, {"caminho": "presente.txt"}, {"path": None}, {"path": 7}, {"path": ["presente.txt"]},
+                ["presente.txt"], "presente.txt", None]
+    self.assertRefusedKeepingTheSession(contents, "INVALID_REQUEST")
 
   def test_file_is_sent_as_meta_8_kib_blocks_and_end_with_its_sha256(self):
     content = os.urandom(2 * 8192 + 3616)

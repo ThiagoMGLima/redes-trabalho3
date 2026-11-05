@@ -284,7 +284,10 @@ class Server:
     self._deliver(session.name, text, skip=session)
 
   def _receive_file_request(self, session, content):
-    path = content["path"]
+    path = content.get("path") if isinstance(content, dict) else None
+    if not isinstance(path, str):
+      self._refuse(session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string")
+      return
     try:
       file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
     except FileNotFoundError:
