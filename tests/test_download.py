@@ -331,6 +331,29 @@ class ScriptedServerDownloadTest(unittest.TestCase):
       self.send(p.FILE_DATA, block)
     self.send(p.FILE_END, {"sha256": sha256})
 
+  def test_content_stays_in_a_temporary_file_until_the_final_check_and_is_announced_after_publication(self):
+    content = os.urandom(3 * p.CHUNK_SIZE)
+    blocks = [content[start:start + p.CHUNK_SIZE] for start in range(0, len(content), p.CHUNK_SIZE)]
+    destination = self.downloaded("aulas/resumo.pdf")
+    self.request("aulas/resumo.pdf")
+
+    self.send(p.FILE_META, {"size": len(content)})
+    for block in blocks:
+      self.send(p.FILE_DATA, block)
+
+    def temporary_with_content():
+      return [path for path in files_under(self.downloads_root) if os.path.getsize(self.downloaded(path)) > 0]
+    self.assertTrue(wait_until(temporary_with_content), files_under(self.downloads_root))
+    self.assertNotIn("aulas/resumo.pdf", files_under(self.downloads_root))
+    self.assertFalse(os.path.lexists(destination))
+    self.assertNotIn(CONCLUDED, self.output.text)
+
+    self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
+    self.output.wait_for(CONCLUDED)
+    with open(destination, "rb") as file:
+      self.assertEqual(file.read(), content)
+    self.assertEqual(files_under(self.downloads_root), ["aulas/resumo.pdf"])
+
   def test_size_or_hash_mismatch_discards_the_temporary_file_and_publishes_nothing(self):
     abc = hashlib.sha256(b"abc").hexdigest()
     mismatches = [

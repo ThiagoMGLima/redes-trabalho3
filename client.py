@@ -76,6 +76,7 @@ class Download:
 
   def write(self, block):
     self._temp.write(block)
+    self._temp.flush()
     self._digest.update(block)
     self._received += len(block)
 
