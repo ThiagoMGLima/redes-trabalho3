@@ -56,9 +56,10 @@ class Session:
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
-  da sessão com `send` e arquivos com `send_file`. `close` é idempotente e pode ser chamado por qualquer
-  thread: a primeira chamada descarta a fila, interrompe as duas threads e
-  notifica `on_close` uma única vez. O socket é fechado pela thread de
+  da sessão com `send` e arquivos com `send_file`. `close` é idempotente e
+  pode ser chamado por qualquer thread: a primeira chamada descarta a fila,
+  fecha os arquivos pendentes, interrompe as duas threads e notifica
+  `on_close` uma única vez. O socket é fechado pela thread de
   atendimento depois que a escritora termina.
   """
 
@@ -90,8 +91,9 @@ class Session:
 
   def send_file(self, file):
     """Enfileira o envio incremental de `file`, aberto em modo binário; a
-    escritora o lê bloco a bloco. A sessão passa a ser dona do arquivo e o
-    fecha ao terminar o envio ou ao ser encerrada."""
+    escritora o lê bloco a bloco, e as mensagens enfileiradas depois dele
+    aguardam o FILE_END. A sessão passa a ser dona do arquivo e o fecha ao
+    terminar o envio ou ao ser encerrada."""
     transfer = FileTransfer(file)
     with self._lock:
       if not self._closed:
@@ -284,9 +286,13 @@ class Server:
     self._deliver(session.name, text, skip=session)
 
   def _receive_file_request(self, session, content):
+    """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
+    escritora da sessão, que o envia bloco a bloco."""
     path = content.get("path") if isinstance(content, dict) else None
     if not isinstance(path, str):
-      self._refuse(session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string")
+      self._refuse(
+        session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
+      )
       return
     try:
       p.check_relative_path(path)
