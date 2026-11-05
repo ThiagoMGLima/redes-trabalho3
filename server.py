@@ -257,6 +257,7 @@ def read_operator_input(server):
     try:
       line = input()
     except EOFError:
+      terminal_log("EOF na entrada do operador: encerrando o servidor")
       return
     try:
       server.broadcast(line)

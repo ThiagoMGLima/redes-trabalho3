@@ -153,6 +153,25 @@ class OperatorBroadcastTest(ServerProcessTestCase):
       raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
 
 
+class OperatorEofTest(ServerProcessTestCase):
+  def test_eof_on_operator_input_stops_accepting_and_ends_existing_sessions(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+
+    process.stdin.close()
+
+    self.assertEqual(process.wait(5), 0)
+    try:
+      self.assertEqual(client.recv(1), b"")
+    except ConnectionResetError:
+      pass
+    with self.assertRaises(ConnectionRefusedError):
+      socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    output.wait_for("EOF na entrada do operador")
+    output.wait_for(f"Desconectado: {address_of(client)}")
+    self.assertNotIn("Traceback", output.text)
+
+
 @unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
 class CtrlCTest(ServerProcessTestCase):
   def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
