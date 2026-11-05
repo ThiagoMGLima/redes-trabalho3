@@ -34,11 +34,12 @@ class ServerConcurrencyTest(unittest.TestCase):
     self.server.start()
     self.addCleanup(self.server.shutdown)
 
-  def connect(self, small_receive_buffer=False):
+  def connect(self):
+    """Participante com buffer de recepção pequeno: quando ele para de ler,
+    o servidor só avança alguns blocos além do que já foi lido."""
     sock = socket.socket()
     self.addCleanup(sock.close)
-    if small_receive_buffer:
-      sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     sock.settimeout(5)
     sock.connect(self.server.address)
     host, port = sock.getsockname()[:2]
@@ -78,7 +79,7 @@ class ServerConcurrencyTest(unittest.TestCase):
   def start_held_download(self, path):
     """Participante que pede `path`, recebe FILE_META e um bloco e para de
     ler: o download fica ativo, preso no meio, até o teste voltar a ler."""
-    sock = self.connect(small_receive_buffer=True)
+    sock = self.connect()
     sock.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
     return sock, self.receive_meta_and_a_block(sock)
 
@@ -132,7 +133,7 @@ class ServerConcurrencyTest(unittest.TestCase):
     FILE_END, a sessão aceita um novo pedido."""
     sha256 = self.share_large("grande.bin")
     outro_sha256 = share(self.shared_root, "outro.txt", b"outro")
-    client = self.connect(small_receive_buffer=True)
+    client = self.connect()
 
     client.sendall(p.encode(p.FILE_REQUEST, {"path": "grande.bin"}) + p.encode(p.FILE_REQUEST, {"path": "outro.txt"}))
     download = self.receive_meta_and_a_block(client)
