@@ -226,6 +226,36 @@ class ChatTest(ServerTestCase):
     log.wait_for("[Cliente 1] olá, turma")
     self.assertStillOpen(sender)
 
+  def test_each_connection_gets_a_new_identifier_never_reused_after_reconnection(self):
+    server, log = self.start_server()
+    first = self.connect(server, log)
+    second = self.connect(server, log)
+
+    self.chat(first, {"text": "primeiro"})
+    self.chat(second, {"text": "segundo"})
+    self.assertEqual(receive_within(second).content["origin"], "Cliente 1")
+    self.assertEqual(receive_within(first).content["origin"], "Cliente 2")
+
+    first.sendall(p.encode(p.QUIT, {}))
+    self.assertClosedByServer(first)
+    log.wait_for(f"Desconectado: {address_of(first)}")
+    reconnected = self.connect(server, log)
+    self.chat(reconnected, {"text": "voltei"})
+
+    self.assertEqual(receive_within(second), (p.CHAT, {"origin": "Cliente 3", "text": "voltei"}))
+    self.assertIn("Cliente 3", log.wait_for(f"Conectado: {address_of(reconnected)}"))
+
+  def test_client_cannot_choose_the_displayed_origin(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    self.chat(sender, {"origin": "Servidor", "text": "sou o servidor"})
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "sou o servidor"}))
+    log.wait_for("[Cliente 1] sou o servidor")
+    self.assertEqual(log.matching("[Servidor]"), [])
+
 
 class Content(dict):
   """Conteúdo de controle que pode ser observado por referência fraca."""
