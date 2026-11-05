@@ -110,7 +110,8 @@ class ServerDownloadTest(unittest.TestCase):
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
   def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
-    self.assertRefusedKeepingTheSession([{"path": "ausente.txt"}, {"path": "pasta/ausente.txt"}], "NOT_FOUND")
+    missing = ["ausente.txt", "pasta/ausente.txt", "presente.txt/dentro.txt"]
+    self.assertRefusedKeepingTheSession([{"path": path} for path in missing], "NOT_FOUND")
 
   def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
     contents = [{}, {"caminho": "presente.txt"}, {"path": None}, {"path": 7}, {"path": ["presente.txt"]},

@@ -295,7 +295,7 @@ class Server:
       return
     try:
       file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
       self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
       return
     session.send_file(file)
