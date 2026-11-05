@@ -11,7 +11,7 @@ import weakref
 
 import protocol as p
 from server import Server, Session
-from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, tcp_pair, wait_until
+from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, receive_within, tcp_pair, wait_until
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")
 
@@ -98,22 +98,85 @@ class ShutdownTest(ServerTestCase):
       socket.create_connection(address, timeout=1).close()
 
 
-@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
-class CtrlCTest(unittest.TestCase):
-  def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
+class ServerProcessTestCase(unittest.TestCase):
+  """O servidor roda como no terminal; a entrada padrão é a do operador."""
+
+  def start_server_process(self):
     port = free_port()
     process = subprocess.Popen(
       [sys.executable, "-u", SERVER_SCRIPT, str(port)],
-      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     output = OutputReader(process.stdout)
     self.addCleanup(output.close)
     self.addCleanup(process.wait, 5)
     self.addCleanup(process.kill)
+    self.addCleanup(process.stdin.close)
     output.wait_for(str(port))
+    return process, output, port
+
+  def connect(self, port, output):
     client = socket.create_connection(("127.0.0.1", port), timeout=5)
     self.addCleanup(client.close)
     output.wait_for(f"Conectado: {address_of(client)}")
+    return client
+
+  def type_line(self, process, line):
+    process.stdin.write(line + "\n")
+    process.stdin.flush()
+
+
+class OperatorBroadcastTest(ServerProcessTestCase):
+  def test_operator_message_reaches_every_connected_client_with_origin_servidor(self):
+    process, output, port = self.start_server_process()
+    first = self.connect(port, output)
+    second = self.connect(port, output)
+
+    self.type_line(process, "  Aviso: ação às 10h 😀 ")
+
+    expected = (p.CHAT, {"origin": "Servidor", "text": "  Aviso: ação às 10h 😀 "})
+    self.assertEqual(receive_within(first), expected)
+    self.assertEqual(receive_within(second), expected)
+
+  def test_operator_text_outside_the_rules_is_refused_locally_and_not_sent(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+    refused = ["", "   ", "com\ttabulação", "escape \x1b[31m", "😀" * 256 + "a"]
+
+    for text in refused:
+      self.type_line(process, text)
+    self.type_line(process, "😀" * 256)
+
+    self.assertEqual(receive_within(client), (p.CHAT, {"origin": "Servidor", "text": "😀" * 256}))
+    if not wait_until(lambda: output.text.count("Mensagem recusada") == len(refused)):
+      raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
+
+
+class OperatorEofTest(ServerProcessTestCase):
+  def test_eof_on_operator_input_stops_accepting_and_ends_existing_sessions(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+
+    process.stdin.close()
+
+    self.assertEqual(process.wait(5), 0)
+    try:
+      self.assertEqual(client.recv(1), b"")
+    except ConnectionResetError:
+      pass
+    with self.assertRaises(ConnectionRefusedError):
+      socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    output.wait_for("EOF na entrada do operador")
+    output.wait_for(f"Desconectado: {address_of(client)}")
+    self.assertNotIn("Traceback", output.text)
+
+
+@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
+class CtrlCTest(ServerProcessTestCase):
+  def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
 
     process.send_signal(signal.SIGINT)
 
@@ -206,6 +269,106 @@ class DeadlineTest(ServerTestCase):
     self.assertEqual(log.matching(f"Desconectado: {address_of(client)}"), [])
     client.sendall(p.encode(p.QUIT, {}))
     self.assertClosedByServer(client)
+
+
+class ChatTest(ServerTestCase):
+  def chat(self, sock, content):
+    sock.sendall(p.encode(p.CHAT, content))
+
+  def test_client_chat_reaches_the_server_terminal_and_the_other_clients_without_echo(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    first = self.connect(server, log)
+    second = self.connect(server, log)
+
+    self.chat(sender, {"text": "olá, turma"})
+
+    expected = (p.CHAT, {"origin": "Cliente 1", "text": "olá, turma"})
+    self.assertEqual(receive_within(first), expected)
+    self.assertEqual(receive_within(second), expected)
+    log.wait_for("[Cliente 1] olá, turma")
+    self.assertStillOpen(sender)
+
+  def test_each_connection_gets_a_new_identifier_never_reused_after_reconnection(self):
+    server, log = self.start_server()
+    first = self.connect(server, log)
+    second = self.connect(server, log)
+
+    self.chat(first, {"text": "primeiro"})
+    self.chat(second, {"text": "segundo"})
+    self.assertEqual(receive_within(second).content["origin"], "Cliente 1")
+    self.assertEqual(receive_within(first).content["origin"], "Cliente 2")
+
+    first.sendall(p.encode(p.QUIT, {}))
+    self.assertClosedByServer(first)
+    log.wait_for(f"Desconectado: {address_of(first)}")
+    reconnected = self.connect(server, log)
+    self.chat(reconnected, {"text": "voltei"})
+
+    self.assertEqual(receive_within(second), (p.CHAT, {"origin": "Cliente 3", "text": "voltei"}))
+    self.assertIn("Cliente 3", log.wait_for(f"Conectado: {address_of(reconnected)}"))
+
+  def test_client_cannot_choose_the_displayed_origin(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    self.chat(sender, {"origin": "Servidor", "text": "sou o servidor"})
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "sou o servidor"}))
+    log.wait_for("[Cliente 1] sou o servidor")
+    self.assertEqual(log.matching("[Servidor]"), [])
+
+  def test_text_from_1_to_1024_utf8_bytes_is_forwarded_unchanged(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+    accepted = ["a", "😀" * 256, "é" * 512, "  ação  com   espaços 👍🏽 ", "👨‍👩‍👧 família"]
+
+    for text in accepted:
+      self.chat(sender, {"text": text})
+
+    self.assertEqual([receive_within(other).content["text"] for _ in accepted], accepted)
+    self.assertStillOpen(sender)
+
+  def assertRefusedKeepingTheSession(self, frames, code):
+    """Cada frame recebe ERROR com `code`; nada é encaminhado e a sessão
+    continua: a próxima mensagem válida é a primeira que o outro recebe."""
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    for frame in frames:
+      sender.sendall(frame)
+      error = receive_within(sender)
+      self.assertEqual(error.type, p.ERROR)
+      self.assertEqual((error.content["operation"], error.content["code"]), ("CHAT", code))
+      self.assertTrue(error.content["message"])
+    self.chat(sender, {"text": "válida"})
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "válida"}))
+    self.assertEqual(log.matching("Desconectado:"), [])
+
+  def test_refused_text_gets_invalid_chat_and_the_session_is_kept(self):
+    refused = [
+      "",
+      "   ",
+      "com\ttabulação",
+      "linha 1\nlinha 2",
+      "linha 1 linha 2",
+      "escape \x1b[31m",
+      "😀" * 256 + "a",
+      "a" * 1023 + "é",
+    ]
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], "INVALID_CHAT")
+
+  def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
+    contents = [{}, {"mensagem": "oi"}, {"text": None}, {"text": 42}, {"text": ["oi"]}, ["oi"], "oi", 7, None]
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], "INVALID_REQUEST")
+
+  def test_text_that_cannot_be_encoded_as_utf8_gets_invalid_chat(self):
+    payload = b'{"text": "\\ud800"}'
+    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
 
 
 class Content(dict):
