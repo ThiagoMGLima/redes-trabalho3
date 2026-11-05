@@ -307,6 +307,24 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.assertFalse(os.path.lexists(self.downloaded("aulas/grande.bin")))
     self.assertExitsAfterEnter()
 
+  @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
+  def test_failure_to_remove_the_temporary_after_a_mismatch_is_reported_and_the_session_continues(self):
+    temporary = self.start_transfer("aulas/grande.bin")
+    self.forbid_removals_in(os.path.dirname(temporary))
+
+    self.send(p.FILE_END, {"sha256": "0" * 64})
+
+    self.output.wait_for("Download de aulas/grande.bin falhou")
+    self.output.wait_for(f"Não foi possível remover o arquivo temporário {temporary}")
+    self.send(p.CHAT, {"origin": "Servidor", "text": "a sessão continua"})
+    self.output.wait_for("[Servidor] a sessão continua")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertNotIn("Desconectado", self.output.text)
+    self.assertFalse(os.path.lexists(self.downloaded("aulas/grande.bin")))
+    self.type_line("1")
+    self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
+    self.assertExitsAfterEnter()
+
 
 if __name__ == "__main__":
   unittest.main()

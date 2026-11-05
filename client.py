@@ -88,24 +88,21 @@ class Download:
   def finish(self, sha256):
     """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
     FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
-    Levanta DownloadFailed com o motivo; o temporário é sempre removido."""
+    Levanta DownloadFailed com o motivo. Publicado ou não, o temporário
+    continua lá até `discard`."""
+    self._temp.close()
+    if self._received != self._size:
+      raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
+    if sha256 != self._digest.hexdigest():
+      raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
     try:
-      self._temp.close()
-      if self._received != self._size:
-        raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
-      if sha256 != self._digest.hexdigest():
-        raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
-      try:
-        os.link(self._temp_path, self.destination)
-      except FileExistsError:
-        raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
-    finally:
-      os.unlink(self._temp_path)
+      os.link(self._temp_path, self.destination)
+    except FileExistsError:
+      raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
 
   def discard(self):
-    """Fecha e remove o temporário de um download que não terminou; sem
-    temporário, não faz nada. Levanta TemporaryNotRemoved se a remoção
-    falhar."""
+    """Fecha e remove o temporário, se houver, ao fim do download: concluído,
+    falho ou interrompido. Levanta TemporaryNotRemoved se a remoção falhar."""
     if self._temp is None:
       return
     self._temp.close()
@@ -243,19 +240,22 @@ class Client:
         outcome = f"Download de {download.path} falhou: {error}. Nada foi publicado."
       else:
         outcome = f"Download concluído: {download.path} publicado em {download.destination}"
-      self._download = None
-      self._show_received(outcome)
+      self._end_download(outcome)
 
   def _interrupt_download(self):
-    """Fim da sessão com download ativo, por Sair ou desconexão: o
-    temporário é descartado e nada é publicado; uma falha ao removê-lo é
-    informada. Não há retomada."""
+    """Fim da sessão com download ativo, por Sair ou desconexão: nada é
+    publicado e não há retomada."""
+    if self._download is not None:
+      self._end_download(
+        f"Download de {self._download.path} interrompido: nada foi publicado. "
+        "Solicite-o novamente para baixá-lo desde o início."
+      )
+
+  def _end_download(self, outcome):
+    """Encerra o download ativo: descarta o temporário e exibe `outcome`
+    seguido, se a remoção falhar, da falha."""
     download, self._download = self._download, None
-    if download is None:
-      return
-    report = [
-      f"Download de {download.path} interrompido: nada foi publicado. Solicite-o novamente para baixá-lo desde o início."
-    ]
+    report = [outcome]
     try:
       download.discard()
     except TemporaryNotRemoved as error:
@@ -263,23 +263,31 @@ class Client:
     self._show_received("\n".join(report))
 
   def _receive_loop(self):
+    """Recebe até a conexão terminar. A sessão acaba quando a receptora
+    para, por qualquer motivo: o download ativo é interrompido e, se a saída
+    não foi pedida, a desconexão é exibida sem esperar o teclado."""
+    try:
+      self._receive_until_end()
+    finally:
+      self._disconnected.set()
+      self._interrupt_download()
+      if not self._leaving.is_set():
+        show("\nDesconectado do servidor. Pressione Enter para sair.")
+
+  def _receive_until_end(self):
     while True:
       try:
         message = p.receive_message(self._sock)
       except (p.ProtocolError, OSError):
-        message = None
+        return
       if message is None:
-        break
+        return
       if message.type == p.CHAT and isinstance(message.content, dict):
         self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
       elif message.type == p.ERROR and isinstance(message.content, dict):
         self._receive_error(message.content)
       elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
         self._receive_download(message)
-    self._disconnected.set()
-    self._interrupt_download()
-    if not self._leaving.is_set():
-      show("\nDesconectado do servidor. Pressione Enter para sair.")
 
 
 def main():
