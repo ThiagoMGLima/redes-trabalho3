@@ -175,6 +175,11 @@ class DownloadFailed(Exception):
   """Download não publicado; a mensagem traz o motivo."""
 
 
+class TemporaryNotRemoved(Exception):
+  """O temporário de um download não pôde ser removido; a mensagem traz o
+  caminho e o motivo."""
+
+
 class Download:
   """Download ativo, do pedido até a publicação. A receptora grava cada bloco
   recebido em um temporário na pasta do destino e calcula o SHA-256 nos
@@ -228,15 +233,16 @@ class Download:
     é a que se alcança a partir da raiz de downloads sem passar por links e
     que o nome em questão é o próprio temporário verificado; se a
     confirmação falhar depois de publicar, a publicação é desfeita. Levanta
-    DownloadFailed com o motivo; o temporário é sempre descartado."""
+    DownloadFailed com o motivo, inclusive uma falha local ao publicar.
+    Publicado ou não, o temporário continua lá até `discard`."""
     if self._failure is not None:
       raise DownloadFailed(self._failure)
+    self._temp.close()
+    if self._received != self._size:
+      raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
+    if sha256 != self._digest.hexdigest():
+      raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
     try:
-      self._temp.close()
-      if self._received != self._size:
-        raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
-      if sha256 != self._digest.hexdigest():
-        raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
       self._confirm(self._temp_name)
       try:
         os.link(self._temp_name, self._name, src_dir_fd=self._folder, dst_dir_fd=self._folder,
@@ -248,8 +254,30 @@ class Download:
       except DownloadFailed:
         os.unlink(self._name, dir_fd=self._folder)
         raise
+    except OSError as error:
+      raise DownloadFailed(f"não foi possível publicar em {self.destination} ({error.strerror})") from None
+
+  def discard(self):
+    """Ao fim do download, concluído ou não: fecha o temporário e a pasta do
+    destino e remove o temporário, se o nome ainda for dele; um objeto posto
+    em seu lugar é preservado. Levanta TemporaryNotRemoved se a remoção
+    falhar."""
+    if self._folder is None:
+      return
+    try:
+      if self._temp is not None:
+        self._temp.close()
+      try:
+        if self._temp_name is not None and self._is_temporary(self._temp_name):
+          os.unlink(self._temp_name, dir_fd=self._folder)
+      except OSError as error:
+        temporary = os.path.join(os.path.dirname(self.destination), self._temp_name)
+        raise TemporaryNotRemoved(
+          f"Não foi possível remover o arquivo temporário {temporary}: {error.strerror}"
+        ) from None
     finally:
-      self._discard_temporary()
+      os.close(self._folder)
+      self._folder = None
 
   def _confirm(self, name):
     """Levanta DownloadFailed se a pasta aberta no começo deixou de ser a
@@ -266,14 +294,6 @@ class Download:
     except FileNotFoundError:
       return False
     return _identity(status) == self._identity
-
-  def _discard_temporary(self):
-    """Remove o temporário, se o nome ainda for dele, e fecha a pasta."""
-    try:
-      if self._is_temporary(self._temp_name):
-        os.unlink(self._temp_name, dir_fd=self._folder)
-    finally:
-      os.close(self._folder)
 
   def _folder_moved(self):
     """Motivo pelo qual a pasta aberta no começo deixou de ser a pasta do
@@ -414,14 +434,27 @@ class Client:
     elif message.type == p.FILE_DATA:
       download.write(message.content)
     else:
+      self._finish_download(download, fields.get("sha256"))
+
+  def _finish_download(self, download, sha256):
+    """FILE_END: verifica e publica, descarta o temporário e exibe o
+    resultado, seguido da falha ao remover o temporário, se houver. O
+    download deixa de estar ativo mesmo que algo falhe no caminho."""
+    report = []
+    try:
       try:
-        download.finish(fields.get("sha256"))
+        download.finish(sha256)
       except DownloadFailed as error:
-        outcome = f"Download de {download.path} falhou: {error}. Nada foi publicado."
+        report.append(f"Download de {download.path} falhou: {error}. Nada foi publicado.")
       else:
-        outcome = f"Download concluído: {download.path} publicado em {download.destination}"
+        report.append(f"Download concluído: {download.path} publicado em {download.destination}")
+    finally:
       self._download = None
-      self._show_received(outcome)
+      try:
+        download.discard()
+      except TemporaryNotRemoved as error:
+        report.append(str(error))
+    self._show_received("\n".join(report))
 
   def _receive_loop(self):
     while True:

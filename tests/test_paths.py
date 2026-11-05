@@ -411,6 +411,50 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(os.stat(personal).st_nlink, 1)
     self.assertSessionContinues()
 
+  def assertReceiverContinues(self):
+    """A receptora segue exibindo o chat e o download deixou de estar ativo:
+    outro é pedido e concluído em seguida."""
+    self.server_side.sendall(p.encode(p.CHAT, {"origin": "Servidor", "text": "ainda recebendo"}))
+    self.output.wait_for("[Servidor] ainda recebendo")
+    self.assertSessionContinues()
+    self.assertNotIn("Traceback", self.output.text)
+
+  def test_temporary_removed_during_the_transfer_fails_the_download_and_ends_it(self):
+    """Com o temporário já criado e antes do FILE_END, alguém o remove. O
+    download falha com o motivo, sem conclusão, deixa de estar ativo e a
+    receptora continua."""
+    os.mkdir(self.local("aulas"))
+    finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
+    [temporary] = os.listdir(self.local("aulas"))
+    os.unlink(self.local(f"aulas/{temporary}"))
+
+    finish()
+
+    self.output.wait_for("Download de aulas/resumo.pdf falhou")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertReceiverContinues()
+    self.assertEqual(os.listdir(self.local("aulas")), [])
+
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_destination_folder_closed_for_writing_during_the_transfer_fails_the_download_and_ends_it(self):
+    """Com o temporário já criado e antes do FILE_END, a pasta do destino
+    deixa de aceitar escrita. A publicação falha com o motivo, sem
+    conclusão; o temporário que não pôde ser removido é informado; o
+    download deixa de estar ativo e a receptora continua."""
+    os.mkdir(self.local("aulas"))
+    self.addCleanup(os.chmod, self.local("aulas"), 0o700)
+    finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
+    [temporary] = os.listdir(self.local("aulas"))
+    os.chmod(self.local("aulas"), 0o500)
+
+    finish()
+
+    self.output.wait_for("Download de aulas/resumo.pdf falhou")
+    self.output.wait_for(f"Não foi possível remover o arquivo temporário {self.local(f'aulas/{temporary}')}")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertFalse(os.path.lexists(self.local("aulas/resumo.pdf")))
+    self.assertReceiverContinues()
+
   @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
   def test_download_folder_swapped_with_a_link_during_downloads_leaves_nothing_outside_the_root(self):
     """Uma thread troca sem parar a pasta `aulas` por um link para fora da
