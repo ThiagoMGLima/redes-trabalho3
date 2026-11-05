@@ -11,6 +11,35 @@ from tests.support import LogRecorder, receive_within
 from tests.test_download import share
 
 
+class ContainmentTest(unittest.TestCase):
+  """Contenção na raiz autorizada pela relação entre diretórios, depois de
+  resolver os caminhos."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.base = base.name
+    self.root = os.path.join(self.base, "files")
+    os.makedirs(os.path.join(self.root, "aulas"))
+    os.makedirs(os.path.join(self.base, "files-outro"))
+
+  def test_root_and_whatever_lies_under_it_are_inside(self):
+    for target in ("", "aulas", "aulas/resumo.pdf", "ainda/nao/existe.txt", "files-outro"):
+      p.check_inside(self.root, os.path.join(self.root, *target.split("/")))
+    p.check_inside(self.root + os.sep, os.path.join(self.root, "aulas"))
+
+  def test_sibling_folder_whose_name_starts_like_the_root_is_not_inside(self):
+    outside = ["files-outro", "files-outro/segredo.txt", "filesx.txt", "segredo.txt", ""]
+    for target in outside:
+      with self.subTest(target=target), self.assertRaises(p.ForbiddenPath):
+        p.check_inside(self.root, os.path.join(self.base, *target.split("/")))
+
+  def test_resolved_path_that_leaves_the_root_through_a_link_is_not_inside(self):
+    os.symlink(os.path.join(self.base, "files-outro"), os.path.join(self.root, "irma"))
+    with self.assertRaises(p.ForbiddenPath):
+      p.check_inside(self.root, os.path.join(self.root, "irma", "segredo.txt"))
+
+
 class SharedRootTest(unittest.TestCase):
   """Pedidos a um servidor real cuja raiz compartilhada, `files/`, fica em um
   diretório temporário ao lado de uma pasta irmã de nome parecido,

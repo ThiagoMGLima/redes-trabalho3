@@ -54,7 +54,9 @@ def open_shared_file(root, path):
 
   Cada componente é examinado em ordem, sem seguir links, antes de abrir o
   arquivo; assim um link é recusado antes de se considerar a ausência do que
-  viria depois dele, e um objeto não regular nunca é aberto."""
+  viria depois dele, e um objeto não regular nunca é aberto. Por fim, o
+  caminho resolvido precisa estar contido na raiz pela relação entre
+  diretórios."""
   try:
     p.check_relative_path(path)
   except p.ForbiddenPath as error:
@@ -76,6 +78,10 @@ def open_shared_file(root, path):
       raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
   if not stat.S_ISREG(mode):
     raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+  try:
+    p.check_inside(root, target)
+  except p.ForbiddenPath as error:
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
   return _open_regular(target, path)
 
 

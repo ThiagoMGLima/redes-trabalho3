@@ -6,6 +6,7 @@ conteúdo. Controles são objetos JSON em UTF-8; FILE_DATA leva os bytes
 originais do arquivo. O comprimento conta bytes já codificados.
 """
 import json
+import os
 import select
 import struct
 import time
@@ -130,6 +131,21 @@ def check_relative_path(path):
     raise ForbiddenPath("o caminho contém caracteres de controle")
   if any(part in ("", ".", "..") for part in path.split("/")):
     raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
+
+
+def check_inside(root, target):
+  """Levanta ForbiddenPath se `target`, depois de resolvido, não for a
+  própria raiz `root` resolvida nem estiver abaixo dela. A contenção é
+  verificada pela relação entre diretórios, componente a componente: um
+  prefixo textual semelhante, como `files-outro/` diante de `files/`, não
+  prova contenção."""
+  root = os.path.realpath(root)
+  try:
+    inside = os.path.commonpath([root, os.path.realpath(target)]) == root
+  except ValueError:
+    inside = False
+  if not inside:
+    raise ForbiddenPath("o caminho resolvido sai da raiz autorizada")
 
 
 def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):
