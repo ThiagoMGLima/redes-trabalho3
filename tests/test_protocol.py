@@ -7,8 +7,9 @@ import unittest
 import protocol as p
 
 
-def send_in_pieces(sock, data, sizes, pause=0.02):
-  """Envia `data` em pedaços de tamanhos controlados, com pausas entre eles."""
+def send_in_pieces(sock, data, sizes=(), pause=0.02):
+  """Envia `data` em outra thread, em pedaços de tamanhos controlados e com
+  pausas entre eles; o restante segue em um único envio."""
   def run():
     offset = 0
     for size in sizes:
@@ -100,10 +101,11 @@ class InvalidFrameTest(unittest.TestCase):
       with self.subTest(payload=payload[:10]):
         near, far = socket.socketpair()
         with near, far:
-          far.sendall(bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload)
+          sender = send_in_pieces(far, bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload)
 
           with self.assertRaises(p.InvalidFrame):
             p.receive_message(near, timeout=5)
+          sender.join()
 
   def test_encoding_refuses_unknown_type(self):
     with self.assertRaises(ValueError):
@@ -137,6 +139,132 @@ class StreamEndTest(unittest.TestCase):
       self.receive_after_close(announced + quit_frame)
 
 
+class ReceiveDeadlineTest(unittest.TestCase):
+  TIMEOUT = 0.3
+
+  def setUp(self):
+    self.near, self.far = socket.socketpair()
+    self.addCleanup(self.near.close)
+    self.addCleanup(self.far.close)
+
+  def test_frame_started_and_not_finished_expires(self):
+    self.far.sendall(p.encode(p.QUIT, {})[:1])
+
+    start = time.monotonic()
+    with self.assertRaises(p.FrameTimeout):
+      p.receive_message(self.near, timeout=self.TIMEOUT)
+    elapsed = time.monotonic() - start
+
+    self.assertGreaterEqual(elapsed, self.TIMEOUT - 0.05)
+    self.assertLess(elapsed, self.TIMEOUT + 0.5)
+
+  def test_partial_progress_does_not_restart_the_deadline(self):
+    frame = p.encode(p.CHAT, {"text": "devagar" * 4})
+    stop = threading.Event()
+
+    def drip():
+      for byte in frame:
+        if stop.wait(0.05):
+          return
+        self.far.sendall(bytes([byte]))
+    dripper = threading.Thread(target=drip)
+    dripper.start()
+    self.addCleanup(dripper.join)
+    self.addCleanup(stop.set)
+
+    start = time.monotonic()
+    with self.assertRaises(p.FrameTimeout):
+      p.receive_message(self.near, timeout=self.TIMEOUT)
+    elapsed = time.monotonic() - start
+
+    self.assertLess(elapsed, self.TIMEOUT + 0.5)
+
+  def test_idle_wait_before_a_frame_starts_does_not_expire(self):
+    def send_later():
+      time.sleep(self.TIMEOUT * 2)
+      self.far.sendall(p.encode(p.QUIT, {}))
+    sender = threading.Thread(target=send_later)
+    sender.start()
+    self.addCleanup(sender.join)
+
+    self.assertEqual(p.receive_message(self.near, timeout=self.TIMEOUT), (p.QUIT, {}))
+
+  def test_default_receive_deadline_is_10_seconds(self):
+    self.assertEqual(p.RECEIVE_TIMEOUT, 10)
+
+
+def small_buffer_tcp_pair():
+  """Conexão TCP local com buffers pequenos, para que um frame de 64 KiB só
+  avance quando o outro lado lê."""
+  with socket.create_server(("127.0.0.1", 0)) as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sender = socket.socket()
+    sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    sender.connect(listener.getsockname())
+    receiver, _ = listener.accept()
+  return sender, receiver
+
+
+class SendDeadlineTest(unittest.TestCase):
+  TIMEOUT = 0.3
+
+  def setUp(self):
+    self.sender, self.receiver = small_buffer_tcp_pair()
+    self.addCleanup(self.sender.close)
+    self.addCleanup(self.receiver.close)
+
+  def test_message_sent_within_the_deadline_arrives_whole(self):
+    block = bytes(range(256)) * 32
+
+    p.send_message(self.sender, p.FILE_DATA, block, timeout=self.TIMEOUT)
+    p.send_message(self.sender, p.QUIT, {}, timeout=self.TIMEOUT)
+
+    self.assertEqual(p.receive_message(self.receiver), (p.FILE_DATA, block))
+    self.assertEqual(p.receive_message(self.receiver), (p.QUIT, {}))
+
+  def test_frame_blocked_by_a_peer_that_does_not_read_expires(self):
+    block = b"\x00" * (64 * 1024)
+
+    start = time.monotonic()
+    with self.assertRaises(p.FrameTimeout):
+      p.send_message(self.sender, p.FILE_DATA, block, timeout=self.TIMEOUT)
+    elapsed = time.monotonic() - start
+
+    self.assertGreaterEqual(elapsed, self.TIMEOUT - 0.05)
+    self.assertLess(elapsed, self.TIMEOUT + 0.5)
+
+  def test_partial_progress_does_not_restart_the_deadline(self):
+    received = []
+    stop = threading.Event()
+
+    def read_slowly():
+      while not stop.wait(0.02):
+        try:
+          received.append(len(self.receiver.recv(2048)))
+        except OSError:
+          return
+    reader = threading.Thread(target=read_slowly)
+    reader.start()
+    self.addCleanup(reader.join)
+    self.addCleanup(stop.set)
+
+    start = time.monotonic()
+    with self.assertRaises(p.FrameTimeout):
+      p.send_message(self.sender, p.FILE_DATA, b"\x00" * (64 * 1024), timeout=self.TIMEOUT)
+    elapsed = time.monotonic() - start
+    stop.set()
+    reader.join()
+
+    # Os buffers pequenos guardam cerca de 9 KiB; receber bem mais que isso
+    # mostra que o frame avançou durante o prazo, sem chegar ao fim.
+    self.assertLess(elapsed, self.TIMEOUT + 0.5)
+    self.assertGreater(sum(received), 16 * 1024)
+    self.assertLess(sum(received), 64 * 1024 + 5)
+
+  def test_default_send_deadline_is_5_seconds(self):
+    self.assertEqual(p.SEND_TIMEOUT, 5)
+
+
 class LimitsTest(unittest.TestCase):
   def setUp(self):
     self.near, self.far = socket.socketpair()
@@ -146,9 +274,11 @@ class LimitsTest(unittest.TestCase):
   def test_content_of_exactly_64_kib_is_accepted(self):
     block = b"\xab" * (64 * 1024)
 
-    self.far.sendall(p.encode(p.FILE_DATA, block))
+    sender = send_in_pieces(self.far, p.encode(p.FILE_DATA, block))
+    message = p.receive_message(self.near)
+    sender.join()
 
-    self.assertEqual(p.receive_message(self.near), (p.FILE_DATA, block))
+    self.assertEqual(message, (p.FILE_DATA, block))
 
   def test_encoding_refuses_content_above_64_kib(self):
     with self.assertRaises(ValueError):
