@@ -365,6 +365,22 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(sorted(os.listdir(self.local("aulas"))), ["arquivo.txt", "link.txt", "pasta.txt"])
     self.assertEqual(files_under(self.outside), [])
 
+  def test_destination_follows_only_the_requested_path_whatever_the_server_sends(self):
+    content = b"conteudo pedido"
+    elsewhere = {"path": "../../fora/outro.txt", "name": "outro.txt", "filename": "outro.txt",
+                 "destination": os.path.join(self.outside, "outro.txt")}
+    self.request("aulas/resumo.pdf")
+
+    self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content), **elsewhere}))
+    self.server_side.sendall(p.encode(p.FILE_DATA, content))
+    self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest(), **elsewhere}))
+
+    self.output.wait_for(CONCLUDED)
+    self.assertEqual(files_under(self.downloads_root), ["aulas/resumo.pdf"])
+    with open(self.local("aulas/resumo.pdf"), "rb") as file:
+      self.assertEqual(file.read(), content)
+    self.assertEqual(files_under(self.outside) + files_under(self.sibling), [])
+
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
     with open(self.local("meu.txt"), "wb") as file:
       file.write(b"meu")
