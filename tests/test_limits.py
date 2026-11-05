@@ -113,6 +113,22 @@ class SlowRecipientTest(ServerTestCase):
     self.assertSeesTheEnd(slow)
     self.assertTheOthersKeepChatting(sender, other, log)
 
+  def test_blocked_send_expires_by_the_deadline_without_delaying_the_others(self):
+    send_timeout = 0.8
+    server, log = self.start_server(send_timeout=send_timeout)
+    slow = self.connect_slow_reader(server, log)
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    # Com uma mensagem a cada 25 ms, menos de 64 aguardam durante o prazo:
+    # quem desconecta é o prazo de envio, não a fila cheia.
+    slowest = self.chat_until_disconnected(slow, sender, other, log, pause=0.025)
+
+    self.assertIn("prazo de envio", log.wait_for(f"Desconectado: {address_of(slow)}"))
+    self.assertLess(slowest, send_timeout / 2)
+    self.assertSeesTheEnd(slow)
+    self.assertTheOthersKeepChatting(sender, other, log)
+
 
 class OutgoingQueueTest(unittest.TestCase):
   """Fila de saída de uma sessão sobre uma conexão TCP local; `peer` é o
