@@ -237,6 +237,7 @@ class Server:
     self._log = log
     self._lock = threading.Lock()
     self._sessions = {}
+    self._started = []
     self._last_client_number = 0
     self._stopping = False
 
@@ -258,6 +259,9 @@ class Server:
     self._deliver(SERVER_ORIGIN, text)
 
   def shutdown(self):
+    """Para de aceitar conexões, encerra as sessões conectadas sem esperar
+    seus envios e só retorna quando as threads de todas as sessões, inclusive
+    as que já estavam terminando por outro motivo, finalizaram."""
     with self._lock:
       if self._stopping:
         return
@@ -269,9 +273,10 @@ class Server:
     self._wake_writer.close()
     with self._lock:
       sessions = list(self._sessions)
+      started = list(self._started)
     for session in sessions:
       session.close("servidor encerrado")
-    for session in sessions:
+    for session in started:
       session.join()
 
   def _accept_loop(self):
@@ -304,6 +309,9 @@ class Server:
     )
     with self._lock:
       self._sessions[session] = address
+      # Uma sessão deixa os destinatários ao ser encerrada, mas o
+      # encerramento do servidor ainda espera suas threads.
+      self._started = [started for started in self._started if started.is_alive()] + [session]
     self._log(f"Conectado: {address} como {client_id}")
     session.start()
 

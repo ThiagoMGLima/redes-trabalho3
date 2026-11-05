@@ -458,17 +458,37 @@ class ServerInterruptionTest(unittest.TestCase):
   def assertNoThreadLeft(self):
     self.assertEqual(set(threading.enumerate()) - self.threads_before, set())
 
+  def shutdown_without_waiting(self):
+    """Encerra o servidor numa thread à parte. O encerramento precisa
+    terminar muito antes do prazo de envio de 60 s, porque um envio
+    bloqueado não pode ser esperado, e, quando termina, as threads do
+    servidor já finalizaram."""
+    left = []
+    def stop():
+      self.server.shutdown()
+      started = set(threading.enumerate()) - self.threads_before - {threading.current_thread()}
+      left.extend(thread for thread in started if thread.is_alive())
+    stopping = threading.Thread(target=stop, daemon=True)
+    stopping.start()
+    stopping.join(5)
+    self.assertFalse(stopping.is_alive(), "o encerramento esperou as transferências")
+    self.assertEqual(left, [], "threads do servidor ainda rodavam quando o encerramento terminou")
+
   def test_shutdown_with_active_downloads_interrupts_them_without_waiting(self):
+    """Dois participantes com downloads presos no meio e um ocioso."""
     self.start_server()
     downloads = [self.stalled_download(f"grande {number}.bin") for number in (1, 2)]
+    idle = self.connect()
     address = self.server.address
 
-    self.server.shutdown()
+    self.shutdown_without_waiting()
 
     for sock, shared in downloads:
       self.assertFalse(is_open_here(shared))
       self.assertIn("servidor encerrado", self.log.wait_for(f"Desconectado: {address_of(sock)}"))
       read_until_closed(sock)
+    self.assertIn("servidor encerrado", self.log.wait_for(f"Desconectado: {address_of(idle)}"))
+    read_until_closed(idle)
     self.assertNoThreadLeft()
     with self.assertRaises(ConnectionRefusedError):
       socket.create_connection(address, timeout=1).close()
@@ -519,7 +539,7 @@ class ServerInterruptionTest(unittest.TestCase):
         leaving = threading.Thread(target=leave)
         leaving.start()
         barrier.wait()
-        self.server.shutdown()
+        self.shutdown_without_waiting()
         leaving.join()
 
         self.assertEqual(len(self.log.matching(f"Desconectado: {name}")), 1)
