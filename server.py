@@ -14,6 +14,8 @@ HOST = ""
 PORT = 50007
 SERVER_ORIGIN = "Servidor"
 SHARED_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
+MAX_CLIENTS = 10
+MAX_PENDING = 64
 
 
 def terminal_log(line):
@@ -56,11 +58,12 @@ class Session:
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
-  da sessão com `send` e arquivos com `send_file`. `close` é idempotente e
-  pode ser chamado por qualquer thread: a primeira chamada descarta a fila,
-  fecha os arquivos pendentes, interrompe as duas threads e notifica
-  `on_close` uma única vez. O socket é fechado pela thread de
-  atendimento depois que a escritora termina.
+  da sessão com `send` e arquivos com `send_file`, que nunca esperam espaço:
+  a fila guarda até MAX_PENDING mensagens pendentes e, cheia, encerra só esta
+  sessão. `close` é idempotente e pode ser chamado por qualquer thread: a
+  primeira chamada descarta a fila, fecha os arquivos pendentes, interrompe
+  as duas threads e notifica `on_close` uma única vez. O socket é fechado
+  pela thread de atendimento depois que a escritora termina.
   """
 
   _STOP = object()
@@ -75,7 +78,7 @@ class Session:
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
-    self._outgoing = queue.Queue()
+    self._outgoing = queue.Queue(MAX_PENDING)
     self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
     self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
 
@@ -84,10 +87,7 @@ class Session:
     self._reader.start()
 
   def send(self, msg_type, content):
-    with self._lock:
-      if self._closed:
-        return
-      self._outgoing.put((msg_type, content))
+    self._enqueue((msg_type, content))
 
   def send_file(self, file):
     """Enfileira o envio incremental de `file`, aberto em modo binário; a
@@ -95,11 +95,21 @@ class Session:
     aguardam o FILE_END. A sessão passa a ser dona do arquivo e o fecha ao
     terminar o envio ou ao ser encerrada."""
     transfer = FileTransfer(file)
+    if not self._enqueue(transfer):
+      transfer.close()
+
+  def _enqueue(self, item):
+    """Enfileira sem esperar espaço e informa se o item entrou na fila."""
     with self._lock:
-      if not self._closed:
-        self._outgoing.put(transfer)
-        return
-    transfer.close()
+      if self._closed:
+        return False
+      try:
+        self._outgoing.put_nowait(item)
+        return True
+      except queue.Full:
+        pass
+    self.close(f"fila de saída cheia: {MAX_PENDING} mensagens pendentes")
+    return False
 
   def close(self, reason):
     with self._lock:
@@ -107,7 +117,7 @@ class Session:
         return
       self._closed = True
       self._discard_outgoing()
-      self._outgoing.put(self._STOP)
+      self._outgoing.put_nowait(self._STOP)
     try:
       self.sock.shutdown(socket.SHUT_RDWR)
     except OSError:
@@ -244,8 +254,13 @@ class Server:
 
   def _open_session(self, sock, address):
     with self._lock:
-      self._last_client_number += 1
-      client_id = f"Cliente {self._last_client_number}"
+      full = len(self._sessions) >= MAX_CLIENTS
+      if not full:
+        self._last_client_number += 1
+        client_id = f"Cliente {self._last_client_number}"
+    if full:
+      self._refuse_connection(sock, address)
+      return
     session = Session(
       sock,
       client_id,
@@ -258,6 +273,12 @@ class Server:
       self._sessions[session] = address
     self._log(f"Conectado: {address} como {client_id}")
     session.start()
+
+  def _refuse_connection(self, sock, address):
+    """Conexão excedente: fechada imediatamente, sem identificador nem
+    mensagem ao cliente; a recusa fica registrada no servidor."""
+    sock.close()
+    self._log(f"Recusado: {address} (limite de {MAX_CLIENTS} clientes simultâneos atingido)")
 
   def _end_session(self, session, reason):
     with self._lock:
