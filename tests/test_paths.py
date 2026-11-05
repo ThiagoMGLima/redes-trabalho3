@@ -84,6 +84,23 @@ class SharedRootTest(unittest.TestCase):
     links = ["interno.txt", "aulas/interno.pdf", "externo.txt", "relativo.txt", "quebrado.txt"]
     self.assertRefusedKeepingTheSession(links, p.PATH_FORBIDDEN)
 
+  def test_symbolic_link_as_an_intermediate_folder_is_forbidden_before_absence_is_considered(self):
+    """Um link usado como pasta é proibido mesmo que leve a um arquivo
+    existente, inclusive na pasta irmã de nome parecido, ou que não leve a
+    nada: a proibição vem antes de classificar o arquivo como ausente."""
+    share(self.shared_root, "presente.txt", b"presente")
+    share(self.shared_root, "aulas/2024/resumo.pdf", b"resumo")
+    self.link("atalho", "aulas")
+    self.link("aulas/ano", os.path.join(self.shared_root, "aulas", "2024"))
+    self.link("irma", "../files-outro")
+    self.link("quebrado", "nao-existe")
+
+    self.start_server()
+
+    paths = ["atalho/2024/resumo.pdf", "aulas/ano/resumo.pdf", "irma/segredo.txt", "atalho/ausente.txt",
+             "quebrado/ausente.txt"]
+    self.assertRefusedKeepingTheSession(paths, p.PATH_FORBIDDEN)
+
 
 if __name__ == "__main__":
   unittest.main()

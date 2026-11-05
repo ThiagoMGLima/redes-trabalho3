@@ -45,18 +45,30 @@ class FileRefused(Exception):
 def open_shared_file(root, path):
   """Abre para leitura binária o arquivo `path`, relativo à raiz
   compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
-  sintaxe proibida ou link simbólico e NOT_FOUND para arquivo inexistente."""
+  sintaxe proibida ou link simbólico em qualquer pasta do caminho ou no
+  arquivo, e NOT_FOUND para arquivo inexistente.
+
+  Cada componente é examinado em ordem, sem seguir links, antes de abrir o
+  arquivo; assim um link é recusado antes de se considerar a ausência do que
+  viria depois dele."""
   try:
     p.check_relative_path(path)
   except p.ForbiddenPath as error:
     raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
-  target = os.path.join(root, *path.split("/"))
-  try:
-    if stat.S_ISLNK(os.lstat(target).st_mode):
-      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
-    return open(target, "rb")
-  except (FileNotFoundError, NotADirectoryError):
-    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
+  parts = path.split("/")
+  target = root
+  for depth, part in enumerate(parts, start=1):
+    target = os.path.join(target, part)
+    try:
+      mode = os.lstat(target).st_mode
+    except FileNotFoundError:
+      raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
+    if stat.S_ISLNK(mode):
+      link = "/".join(parts[:depth])
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {link} é um link simbólico")
+    if depth < len(parts) and not stat.S_ISDIR(mode):
+      raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  return open(target, "rb")
 
 
 class FileTransfer:
