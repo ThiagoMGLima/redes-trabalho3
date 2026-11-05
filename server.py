@@ -10,6 +10,8 @@ import protocol as p
 HOST = ""
 PORT = 50007
 SERVER_ORIGIN = "Servidor"
+MAX_CLIENTS = 10
+MAX_PENDING = 64
 
 
 def terminal_log(line):
@@ -31,10 +33,12 @@ class Session:
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
-  da sessão com `send`. `close` é idempotente e pode ser chamado por qualquer
-  thread: a primeira chamada descarta a fila, interrompe as duas threads e
-  notifica `on_close` uma única vez. O socket é fechado pela thread de
-  atendimento depois que a escritora termina.
+  da sessão com `send`, que nunca espera espaço: a fila guarda até
+  MAX_PENDING mensagens pendentes e, cheia, encerra só esta sessão. `close` é
+  idempotente e pode ser chamado por qualquer thread: a primeira chamada
+  descarta a fila, interrompe as duas threads e notifica `on_close` uma única
+  vez. O socket é fechado pela thread de atendimento depois que a escritora
+  termina.
   """
 
   _STOP = object()
@@ -49,7 +53,7 @@ class Session:
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
-    self._outgoing = queue.Queue()
+    self._outgoing = queue.Queue(MAX_PENDING)
     self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
     self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
 
@@ -61,7 +65,12 @@ class Session:
     with self._lock:
       if self._closed:
         return
-      self._outgoing.put((msg_type, content))
+      try:
+        self._outgoing.put_nowait((msg_type, content))
+        return
+      except queue.Full:
+        pass
+    self.close(f"fila de saída cheia: {MAX_PENDING} mensagens pendentes")
 
   def close(self, reason):
     with self._lock:
@@ -69,7 +78,7 @@ class Session:
         return
       self._closed = True
       self._discard_outgoing()
-      self._outgoing.put(self._STOP)
+      self._outgoing.put_nowait(self._STOP)
     try:
       self.sock.shutdown(socket.SHUT_RDWR)
     except OSError:
@@ -198,8 +207,13 @@ class Server:
 
   def _open_session(self, sock, address):
     with self._lock:
-      self._last_client_number += 1
-      client_id = f"Cliente {self._last_client_number}"
+      full = len(self._sessions) >= MAX_CLIENTS
+      if not full:
+        self._last_client_number += 1
+        client_id = f"Cliente {self._last_client_number}"
+    if full:
+      self._refuse_connection(sock, address)
+      return
     session = Session(
       sock,
       client_id,
@@ -212,6 +226,12 @@ class Server:
       self._sessions[session] = address
     self._log(f"Conectado: {address} como {client_id}")
     session.start()
+
+  def _refuse_connection(self, sock, address):
+    """Conexão excedente: fechada imediatamente, sem identificador nem
+    mensagem ao cliente; a recusa fica registrada no servidor."""
+    sock.close()
+    self._log(f"Recusado: {address} (limite de {MAX_CLIENTS} clientes simultâneos atingido)")
 
   def _end_session(self, session, reason):
     with self._lock:

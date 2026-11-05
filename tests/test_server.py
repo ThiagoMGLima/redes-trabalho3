@@ -418,9 +418,10 @@ class SessionTest(unittest.TestCase):
   def test_messages_from_many_threads_are_written_whole_and_in_order(self):
     session, peer, _ = self.open_session(send_timeout=5)
     block = bytes(range(256)) * 32
+    rounds = 8  # 4 produtores x 8 x 2 = 64 mensagens: cabem na fila mesmo sem leitura
 
     def produce(origin):
-      for number in range(20):
+      for number in range(rounds):
         session.send(p.CHAT, {"origin": origin, "text": str(number)})
         session.send(p.FILE_DATA, block)
     producers = [threading.Thread(target=produce, args=(f"Cliente {n}",)) for n in range(4)]
@@ -429,10 +430,10 @@ class SessionTest(unittest.TestCase):
     for producer in producers:
       producer.join()
 
-    received = [p.receive_message(peer, timeout=5) for _ in range(4 * 20 * 2)]
+    received = [p.receive_message(peer, timeout=5) for _ in range(4 * rounds * 2)]
     for origin in (f"Cliente {n}" for n in range(4)):
       texts = [m.content["text"] for m in received if m.type == p.CHAT and m.content["origin"] == origin]
-      self.assertEqual(texts, [str(number) for number in range(20)])
+      self.assertEqual(texts, [str(number) for number in range(rounds)])
     self.assertTrue(all(m.content == block for m in received if m.type == p.FILE_DATA))
 
   def test_send_deadline_ends_only_this_session(self):
