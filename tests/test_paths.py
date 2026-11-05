@@ -1,14 +1,19 @@
 """Proteção de caminhos: a raiz compartilhada no servidor e a raiz de
 downloads no cliente, pela fronteira TCP e com diretórios temporários."""
+import hashlib
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, receive_within
-from tests.test_download import share
+from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.test_download import CONCLUDED, files_under, share
+
+FORBIDDEN = "Caminho inválido ou proibido"
 
 
 class ContainmentTest(unittest.TestCase):
@@ -194,6 +199,92 @@ class SharedRootTest(unittest.TestCase):
       self.assertEqual(error.type, p.ERROR, (path, error))
       self.assertEqual(error.content["code"], p.PATH_FORBIDDEN, path)
     self.assertEqual(self.log.matching("Desconectado:"), [])
+
+
+class DownloadsRootTest(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa cuja
+  raiz de downloads, `downloads/`, fica ao lado de uma pasta irmã de nome
+  parecido, `downloads-outro/`; o teste faz o papel do servidor na conexão
+  TCP local, controlando o que é enviado e quando."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.base = base.name
+    program = install_programs(os.path.join(self.base, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+    self.sibling = os.path.join(program, "downloads-outro")
+    os.mkdir(self.sibling)
+    self.outside = os.path.join(self.base, "fora")
+    os.mkdir(self.outside)
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    self.addCleanup(listener.close)
+    listener.settimeout(5)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.base,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+    self.server_side, _ = listener.accept()
+    self.addCleanup(self.server_side.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def local(self, path):
+    return os.path.join(self.downloads_root, *path.split("/"))
+
+  def link(self, path, target):
+    """Cria em `downloads/` um link simbólico `path` que aponta para `target`."""
+    os.symlink(target, self.local(path))
+
+  def request(self, path):
+    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
+    self.type_line("2")
+    self.type_line(path)
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+
+  def serve(self, content):
+    self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
+    if content:
+      self.server_side.sendall(p.encode(p.FILE_DATA, content))
+    self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()}))
+
+  def assertRefusedLocally(self, paths, refusal):
+    """Cada caminho é recusado com `refusal` sem que o pedido seja enviado:
+    o primeiro pedido que chega ao servidor é o de um caminho permitido, que
+    em seguida é baixado normalmente."""
+    for path in paths:
+      self.type_line("2")
+      self.type_line(path)
+    self.request("permitido.txt")
+
+    refusals = lambda: self.output.text.count(refusal)
+    self.assertTrue(wait_until(lambda: refusals() == len(paths)), self.output.text)
+    self.serve(b"permitido")
+    self.output.wait_for(CONCLUDED)
+    with open(self.local("permitido.txt"), "rb") as file:
+      self.assertEqual(file.read(), b"permitido")
+
+  def test_symbolic_link_as_a_download_folder_is_refused_locally_without_sending_the_request(self):
+    os.mkdir(self.local("aulas"))
+    self.link("interna", "aulas")
+    self.link("aulas/externa", self.outside)
+    self.link("irma", "../downloads-outro")
+    self.link("quebrada", "nao-existe")
+
+    paths = ["interna/resumo.pdf", "aulas/externa/resumo.pdf", "irma/resumo.pdf", "quebrada/resumo.pdf",
+             "interna/nova/resumo.pdf"]
+    self.assertRefusedLocally(paths, FORBIDDEN)
+    self.assertEqual(files_under(self.outside) + files_under(self.sibling), [])
 
 
 if __name__ == "__main__":

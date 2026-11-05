@@ -47,6 +47,30 @@ def parse_port(text):
   return port
 
 
+def check_destination(root, path):
+  """Destino local de `path`, um caminho já aceito por
+  p.check_relative_path, sob a raiz de downloads `root`. Levanta
+  p.ForbiddenPath se uma pasta existente do caminho for link simbólico;
+  pastas que ainda não existem são aceitas."""
+  parts = path.split("/")
+  existing_folders(root, parts[:-1])
+  return os.path.join(root, *parts)
+
+
+def existing_folders(root, names):
+  """Percorre, sem seguir links, as pastas `names` sob `root` e devolve a
+  última, ou None se alguma ainda não existir. Levanta p.ForbiddenPath para
+  link simbólico."""
+  folder = root
+  for depth, name in enumerate(names, start=1):
+    folder = os.path.join(folder, name)
+    if not os.path.lexists(folder):
+      return None
+    if os.path.islink(folder):
+      raise p.ForbiddenPath(f"{'/'.join(names[:depth])} é um link simbólico")
+  return folder
+
+
 class DownloadFailed(Exception):
   """Download não publicado; a mensagem traz o motivo."""
 
@@ -171,10 +195,10 @@ class Client:
       return
     try:
       p.check_relative_path(path)
+      destination = check_destination(self._downloads_root, path)
     except p.ForbiddenPath as error:
       show(f"Caminho inválido ou proibido: {error}")
       return
-    destination = os.path.join(self._downloads_root, *path.split("/"))
     if os.path.lexists(destination):
       show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")
       return
