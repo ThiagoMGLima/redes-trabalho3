@@ -1,8 +1,10 @@
 """Interrupções de um download ativo: Sair, perda de conexão, prazo e
 encerramento do servidor, observados pela fronteira TCP."""
+import hashlib
 import os
 import socket
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -293,6 +295,42 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.client.stdin.close()
     self.assertEqual(self.client.wait(5), 0)
     self.assertNotIn("Traceback", self.output.text)
+
+  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection):
+    """Um download é concluído e outro está em andamento quando a conexão
+    termina: a desconexão aparece sem que se pressione Enter, o temporário
+    some, nada mais é anunciado como concluído e o primeiro permanece."""
+    self.request("pronto.txt")
+    self.send(p.FILE_META, {"size": 6})
+    self.send(p.FILE_DATA, b"pronto")
+    self.send(p.FILE_END, {"sha256": hashlib.sha256(b"pronto").hexdigest()})
+    self.output.wait_for(CONCLUDED)
+    self.start_transfer("aulas/grande.bin")
+
+    end_connection()
+
+    self.output.wait_for("Desconectado do servidor")
+    self.assertIn("Download de aulas/grande.bin interrompido", self.output.text)
+    self.assertEqual(self.output.text.count(CONCLUDED), 1)
+    self.assertEqual(files_under(self.downloads_root), ["pronto.txt"])
+    with open(self.downloaded("pronto.txt"), "rb") as file:
+      self.assertEqual(file.read(), b"pronto")
+    self.assertExitsAfterEnter()
+
+  def test_connection_closed_between_frames_before_file_end(self):
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(self.server_side.close)
+
+  def test_connection_closed_in_the_middle_of_a_block(self):
+    def cut():
+      self.server_side.sendall(p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE))[:100])
+      self.server_side.close()
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(cut)
+
+  def test_connection_lost_with_a_reset_during_the_transfer(self):
+    def reset():
+      self.server_side.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+      self.server_side.close()
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(reset)
 
   @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
   def test_failure_to_remove_the_temporary_after_a_disconnection_is_reported(self):
