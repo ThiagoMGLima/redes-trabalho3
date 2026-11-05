@@ -149,7 +149,11 @@ class Client:
     path = input(FILE_PROMPT)
     if self._disconnected.is_set():
       return
-    self._download = Download(path, os.path.join(self._downloads_root, *path.split("/")))
+    destination = os.path.join(self._downloads_root, *path.split("/"))
+    if os.path.lexists(destination):
+      show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")
+      return
+    self._download = Download(path, destination)
     try:
       p.send_message(self._sock, p.FILE_REQUEST, {"path": path})
     except (p.ProtocolError, OSError) as error:

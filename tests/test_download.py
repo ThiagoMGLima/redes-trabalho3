@@ -261,5 +261,24 @@ class ClientDownloadTest(unittest.TestCase):
       self.assertEqual(sha256_of(self.downloaded(name)), shas[name], name)
 
 
+  def test_existing_object_at_the_destination_is_preserved_and_the_download_refused(self):
+    for name in ("aulas/resumo.pdf", "pasta", "outro.txt"):
+      share(self.shared_root, name, b"do servidor")
+    share(self.downloads_root, "aulas/resumo.pdf", b"meu resumo")
+    os.makedirs(self.downloaded("pasta/dentro"))
+
+    for name in ("aulas/resumo.pdf", "pasta"):
+      self.type_line("2")
+      self.type_line(name)
+    self.download("outro.txt")
+
+    self.assertEqual(self.output.text.count("já existe"), 2)
+    self.assertEqual(self.output.text.count(CONCLUDED), 1)
+    self.assertEqual(files_under(self.downloads_root), ["aulas/resumo.pdf", "outro.txt"])
+    with open(self.downloaded("aulas/resumo.pdf"), "rb") as file:
+      self.assertEqual(file.read(), b"meu resumo")
+    self.assertEqual(os.listdir(self.downloaded("pasta")), ["dentro"])
+
+
 if __name__ == "__main__":
   unittest.main()
