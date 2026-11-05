@@ -234,6 +234,29 @@ class ScriptedServerClientTest(unittest.TestCase):
     self.output.wait_for(CONCLUDED)
     self.request("segundo.bin")
 
+  def test_chat_and_broadcast_received_mid_download_appear_before_its_conclusion(self):
+    """Chat e broadcast chegam entre os blocos e aparecem enquanto o
+    download ainda está em andamento; o participante responde pelo Chat e o
+    arquivo é publicado íntegro."""
+    content = os.urandom(2 * p.CHUNK_SIZE)
+    self.request("grande.bin")
+    self.send(p.FILE_META, {"size": len(content)})
+    self.send(p.FILE_DATA, content[:p.CHUNK_SIZE])
+
+    self.send(p.CHAT, {"origin": "Cliente 2", "text": "chat no meio do download"})
+    self.send(p.CHAT, {"origin": "Servidor", "text": "broadcast no meio do download"})
+    self.output.wait_for("\n[Cliente 2] chat no meio do download\n")
+    self.output.wait_for("\n[Servidor] broadcast no meio do download\n")
+    self.chat("respondendo durante o download")
+    self.output.wait_for("[Você] respondendo durante o download")
+    self.assertNotIn(CONCLUDED, self.output.text)
+
+    self.send(p.FILE_DATA, content[p.CHUNK_SIZE:])
+    self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
+    self.output.wait_for(CONCLUDED)
+    with open(os.path.join(self.downloads_root, "grande.bin"), "rb") as file:
+      self.assertEqual(file.read(), content)
+
 
 if __name__ == "__main__":
   unittest.main()
