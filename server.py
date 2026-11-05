@@ -227,7 +227,7 @@ class Server:
   def _receive_chat(self, session, content):
     text = content.get("text") if isinstance(content, dict) else None
     if not isinstance(text, str):
-      self._refuse(session, "CHAT", p.INVALID_REQUEST, "CHAT exige um objeto com o campo text em texto")
+      self._refuse(session, "CHAT", p.INVALID_REQUEST, "CHAT exige um objeto com o campo text do tipo string")
       return
     try:
       p.check_chat_text(text)
