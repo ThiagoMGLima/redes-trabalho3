@@ -30,6 +30,24 @@ class ClientLimitTest(ServerTestCase):
     self.assertChatReachesTheOthers(clients[0], clients[1:], "os dez continuam")
     self.assertEqual(log.matching("Desconectado:"), [])
 
+  def test_a_new_connection_is_accepted_again_after_a_client_leaves(self):
+    server, log = self.start_server()
+    clients = self.connect_ten(server, log)
+    refused = socket.create_connection(server.address, timeout=5)
+    self.addCleanup(refused.close)
+    self.assertClosedByServer(refused)
+    log.wait_for(f"Recusado: {address_of(refused)}")
+
+    leaving = clients.pop()
+    leaving.sendall(p.encode(p.QUIT, {}))
+    self.assertClosedByServer(leaving)
+    log.wait_for(f"Desconectado: {address_of(leaving)}")
+    newcomer = self.connect(server, log)
+
+    self.assertChatReachesTheOthers(newcomer, clients, "entrei na vaga")
+    self.assertChatReachesTheOthers(clients[0], clients[1:] + [newcomer], "bem-vindo")
+    self.assertEqual(log.matching(f"Recusado: {address_of(newcomer)}"), [])
+
 
 if __name__ == "__main__":
   unittest.main()
