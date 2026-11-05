@@ -97,6 +97,14 @@ class Download:
     finally:
       os.unlink(self._temp_path)
 
+  def discard(self):
+    """Fecha e remove o temporário de um download que não terminou; sem
+    temporário, não faz nada."""
+    if self._temp is None:
+      return
+    self._temp.close()
+    os.unlink(self._temp_path)
+
 
 class Client:
   """Sessão do participante. A thread principal cuida do teclado e dos
@@ -227,6 +235,17 @@ class Client:
       self._download = None
       self._show_received(outcome)
 
+  def _interrupt_download(self):
+    """Fim da sessão com download ativo, por Sair ou desconexão: o
+    temporário é descartado e nada é publicado. Não há retomada."""
+    download, self._download = self._download, None
+    if download is None:
+      return
+    download.discard()
+    self._show_received(
+      f"Download de {download.path} interrompido: nada foi publicado. Solicite-o novamente para baixá-lo desde o início."
+    )
+
   def _receive_loop(self):
     while True:
       try:
@@ -242,6 +261,7 @@ class Client:
       elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
         self._receive_download(message)
     self._disconnected.set()
+    self._interrupt_download()
     if not self._leaving.is_set():
       show("\nDesconectado do servidor. Pressione Enter para sair.")
 
