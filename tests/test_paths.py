@@ -101,6 +101,22 @@ class SharedRootTest(unittest.TestCase):
              "quebrado/ausente.txt"]
     self.assertRefusedKeepingTheSession(paths, p.PATH_FORBIDDEN)
 
+  @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(socket, "AF_UNIX"), "requer FIFO e socket Unix")
+  def test_folder_fifo_and_other_non_regular_objects_get_not_regular(self):
+    """Nenhum deles é aberto: um FIFO sem escritor não bloqueia a sessão."""
+    share(self.shared_root, "presente.txt", b"presente")
+    share(self.shared_root, "aulas/resumo.pdf", b"resumo")
+    os.mkdir(self.shared("vazia"))
+    os.mkfifo(self.shared("canal"))
+    os.mkfifo(self.shared("aulas/canal"))
+    unix = socket.socket(socket.AF_UNIX)
+    self.addCleanup(unix.close)
+    unix.bind(self.shared("tomada"))
+    self.start_server()
+
+    paths = ["aulas", "vazia", "canal", "aulas/canal", "tomada"]
+    self.assertRefusedKeepingTheSession(paths, p.NOT_REGULAR)
+
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""

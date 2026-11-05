@@ -46,11 +46,12 @@ def open_shared_file(root, path):
   """Abre para leitura binária o arquivo `path`, relativo à raiz
   compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
   sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
-  ou no arquivo, e NOT_FOUND para arquivo inexistente.
+  ou no arquivo, NOT_FOUND para arquivo inexistente e NOT_REGULAR para
+  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular.
 
   Cada componente é examinado em ordem, sem seguir links, antes de abrir o
   arquivo; assim um link é recusado antes de se considerar a ausência do que
-  viria depois dele."""
+  viria depois dele, e um objeto não regular nunca é aberto."""
   try:
     p.check_relative_path(path)
   except p.ForbiddenPath as error:
@@ -70,7 +71,26 @@ def open_shared_file(root, path):
       raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {link} é um link simbólico")
     if depth < len(parts) and not stat.S_ISDIR(mode):
       raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
-  return open(target, "rb")
+  if not stat.S_ISREG(mode):
+    raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+  return _open_regular(target, path)
+
+
+# Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
+# lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
+# a leitura.
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _open_regular(target, path):
+  try:
+    descriptor = os.open(target, _OPEN_FLAGS)
+  except FileNotFoundError:
+    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
+  if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    os.close(descriptor)
+    raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+  return os.fdopen(descriptor, "rb")
 
 
 class FileTransfer:
