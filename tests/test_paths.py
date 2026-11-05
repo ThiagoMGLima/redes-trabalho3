@@ -381,6 +381,24 @@ class DownloadsRootTest(unittest.TestCase):
       self.assertEqual(file.read(), content)
     self.assertEqual(files_under(self.outside) + files_under(self.sibling), [])
 
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_download_folder_without_permission_refuses_the_download_without_ending_the_client(self):
+    """Antes do pedido, a recusa é local; se a permissão faltar depois dele,
+    o download falha ao criar a subpasta."""
+    for folder in ("trancada", "somente-leitura"):
+      os.mkdir(self.local(folder))
+      self.addCleanup(os.chmod, self.local(folder), 0o700)
+    os.chmod(self.local("trancada"), 0)
+
+    self.request("somente-leitura/sub/resumo.pdf")
+    os.chmod(self.local("somente-leitura"), 0o500)
+    self.serve(b"conteudo")
+    self.output.wait_for("Download de somente-leitura/sub/resumo.pdf falhou")
+
+    self.assertRefusedLocally(["trancada/resumo.pdf", "trancada/sub/resumo.pdf"], "Download recusado")
+    self.assertEqual(self.output.text.count(CONCLUDED), 1)
+    self.assertNotIn("Traceback", self.output.text)
+
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
     with open(self.local("meu.txt"), "wb") as file:
       file.write(b"meu")

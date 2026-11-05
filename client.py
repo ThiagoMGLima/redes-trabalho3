@@ -59,15 +59,18 @@ def check_destination(root, path):
   p.ForbiddenPath se a raiz, uma pasta existente do caminho ou o próprio
   destino for link simbólico, e DestinationTaken se já houver algo no
   destino ou algo que não é pasta no lugar de uma delas; pastas que ainda
-  não existem são aceitas."""
+  não existem são aceitas. Uma falha ao examinar o caminho, como falta de
+  permissão, segue como OSError."""
   parts = path.split("/")
   download_folder(root, parts[:-1])
   destination = os.path.join(root, *parts)
-  if os.path.islink(destination):
+  try:
+    mode = os.lstat(destination).st_mode
+  except FileNotFoundError:
+    return destination
+  if stat.S_ISLNK(mode):
     raise p.ForbiddenPath(f"{path} é um link simbólico")
-  if os.path.lexists(destination):
-    raise DestinationTaken(f"já existe algo em {destination}; o objeto existente foi preservado")
-  return destination
+  raise DestinationTaken(f"já existe algo em {destination}; o objeto existente foi preservado")
 
 
 def download_folder(root, names, create=False):
@@ -77,7 +80,8 @@ def download_folder(root, names, create=False):
   existente ou recém-criada, é examinada antes de passar à seguinte, e a
   última precisa estar contida na raiz. Levanta p.ForbiddenPath para link
   simbólico ou saída da raiz e DestinationTaken se algo que não é pasta
-  ocupar o lugar de uma delas."""
+  ocupar o lugar de uma delas; uma falha ao examinar ou criar uma pasta
+  segue como OSError."""
   folder = root
   for depth in range(len(names) + 1):
     if depth:
@@ -134,6 +138,9 @@ class Download:
       return
     except DestinationTaken as error:
       self._failure = str(error)
+      return
+    except OSError as error:
+      self._failure = f"não foi possível preparar a pasta de destino ({error.strerror})"
       return
     descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
     self._temp = os.fdopen(descriptor, "wb")
@@ -245,6 +252,9 @@ class Client:
       return
     except DestinationTaken as error:
       show(f"Download recusado: {error}.")
+      return
+    except OSError as error:
+      show(f"Download recusado: não foi possível verificar o destino ({error.strerror}).")
       return
     self._download = Download(path, destination, self._downloads_root)
     try:
