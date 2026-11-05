@@ -171,6 +171,34 @@ class ServerDownloadTest(unittest.TestCase):
     self.assertEqual(announced, hashlib.sha256(sent).hexdigest())
 
 
+  def test_messages_queued_during_a_transfer_go_between_blocks_before_file_end(self):
+    """O cliente para de ler depois do primeiro bloco de um arquivo de 12 MiB,
+    e outro participante envia chat. A escritora alterna mensagens da fila e
+    blocos: o chat chega antes do FILE_END, sem esperar o arquivo inteiro, e
+    o arquivo chega íntegro."""
+    original = os.urandom(SIZE_12_MIB)
+    sha256 = self.share("grande.bin", original)
+    downloader = self.connect(small_receive_buffer=True)
+    other = self.connect()
+
+    self.request(downloader, "grande.bin")
+    self.assertEqual(receive_within(downloader), (p.FILE_META, {"size": SIZE_12_MIB}))
+    blocks = [receive_within(downloader).content]
+    texts = ["primeira", "segunda", "terceira"]
+    for text in texts:
+      other.sendall(p.encode(p.CHAT, {"text": text}))
+    self.log.wait_for("[Cliente 2] terceira")
+
+    received_chat = []
+    while (message := receive_within(downloader)).type != p.FILE_END:
+      if message.type == p.CHAT:
+        received_chat.append(message.content["text"])
+      else:
+        blocks.append(message.content)
+    self.assertEqual(received_chat, texts)
+    self.assertEqual(b"".join(blocks), original)
+    self.assertEqual(message.content["sha256"], sha256)
+
 
 class ClientDownloadTest(unittest.TestCase):
   """O cliente roda como no terminal, a partir de uma cópia do programa em

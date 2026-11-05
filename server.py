@@ -1,5 +1,5 @@
 import argparse
-import contextlib
+import collections
 import hashlib
 import os
 import queue
@@ -40,17 +40,28 @@ class FileTransfer:
 
   def __init__(self, file):
     self._file = file
+    self._messages = self._read()
+    self.finished = False
 
-  def messages(self):
+  def next_message(self):
+    """Próxima mensagem do envio. Ao entregar o FILE_END, fecha o arquivo e
+    marca `finished`."""
+    message = next(self._messages)
+    if message[0] == p.FILE_END:
+      self.finished = True
+      self.close()
+    return message
+
+  def close(self):
+    self._file.close()
+
+  def _read(self):
     yield p.FILE_META, {"size": os.fstat(self._file.fileno()).st_size}
     digest = hashlib.sha256()
     while block := self._file.read(p.CHUNK_SIZE):
       digest.update(block)
       yield p.FILE_DATA, block
     yield p.FILE_END, {"sha256": digest.hexdigest()}
-
-  def close(self):
-    self._file.close()
 
 
 class Session:
@@ -91,9 +102,9 @@ class Session:
 
   def send_file(self, file):
     """Enfileira o envio incremental de `file`, aberto em modo binário; a
-    escritora o lê bloco a bloco, e as mensagens enfileiradas depois dele
-    aguardam o FILE_END. A sessão passa a ser dona do arquivo e o fecha ao
-    terminar o envio ou ao ser encerrada."""
+    escritora o lê bloco a bloco, alternando com as mensagens da fila. A
+    sessão passa a ser dona do arquivo e o fecha ao terminar o envio ou ao
+    ser encerrada."""
     transfer = FileTransfer(file)
     if not self._enqueue(transfer):
       transfer.close()
@@ -176,21 +187,43 @@ class Session:
       self.close(reason)
 
   def _send_until_stopped(self):
-    while True:
-      item = self._outgoing.get()
-      if item is self._STOP:
-        return "sessão encerrada"
-      try:
+    """Sem arquivo ativo, espera a fila. Com arquivo ativo, alterna uma
+    mensagem da fila, se houver, e a próxima mensagem do arquivo; cada frame
+    é enviado inteiro antes do seguinte. Um arquivo enfileirado durante outro
+    envio começa depois do FILE_END do atual."""
+    active = None
+    files = collections.deque()
+    try:
+      while True:
+        item = self._next_item(wait=active is None and not files)
+        if item is self._STOP:
+          return "sessão encerrada"
         if isinstance(item, FileTransfer):
-          with contextlib.closing(item):
-            for message in item.messages():
-              p.send_message(self.sock, *message, timeout=self._send_timeout)
-        else:
+          files.append(item)
+        elif item is not None:
           p.send_message(self.sock, *item, timeout=self._send_timeout)
-      except p.FrameTimeout:
-        return "prazo de envio expirado"
-      except OSError as error:
-        return f"falha no envio: {error}"
+        if active is None and files:
+          active = files.popleft()
+        if active is not None:
+          p.send_message(self.sock, *active.next_message(), timeout=self._send_timeout)
+          if active.finished:
+            active = None
+    except p.FrameTimeout:
+      return "prazo de envio expirado"
+    except OSError as error:
+      return f"falha no envio: {error}"
+    finally:
+      for transfer in [active, *files]:
+        if transfer is not None:
+          transfer.close()
+
+  def _next_item(self, wait):
+    if wait:
+      return self._outgoing.get()
+    try:
+      return self._outgoing.get_nowait()
+    except queue.Empty:
+      return None
 
 
 class Server:
