@@ -354,6 +354,24 @@ class ScriptedServerDownloadTest(unittest.TestCase):
       self.assertEqual(file.read(), content)
     self.assertEqual(files_under(self.downloads_root), ["aulas/resumo.pdf"])
 
+  def test_menu_stays_available_during_the_download(self):
+    content = os.urandom(2 * p.CHUNK_SIZE)
+    self.request("grande.bin")
+    self.send(p.FILE_META, {"size": len(content)})
+    self.send(p.FILE_DATA, content[:p.CHUNK_SIZE])
+
+    self.type_line("3")
+    self.type_line("durante o download")
+
+    self.assertEqual(receive_within(self.server_side), (p.CHAT, {"text": "durante o download"}))
+    self.output.wait_for("[Você] durante o download")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.send(p.FILE_DATA, content[p.CHUNK_SIZE:])
+    self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
+    self.output.wait_for(CONCLUDED)
+    with open(self.downloaded("grande.bin"), "rb") as file:
+      self.assertEqual(file.read(), content)
+
   def test_size_or_hash_mismatch_discards_the_temporary_file_and_publishes_nothing(self):
     abc = hashlib.sha256(b"abc").hexdigest()
     mismatches = [
