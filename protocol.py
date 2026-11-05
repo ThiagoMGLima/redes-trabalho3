@@ -117,18 +117,24 @@ def check_chat_text(text):
 
 def check_relative_path(path):
   """Aceita um caminho relativo à raiz, com `/` como separador. Levanta
-  ForbiddenPath para caminho vazio ou absoluto, componentes vazios, `.` ou
-  `..`, barra invertida, dois-pontos e caracteres de controle (inclusive NUL).
-  A verificação é feita sobre o texto recebido, antes de qualquer
-  normalização, para que uma entrada proibida nunca vire outra aceita."""
+  ForbiddenPath para caminho vazio ou absoluto, texto que não possa ser
+  codificado em UTF-8, componentes vazios, `.` ou `..`, barra invertida,
+  dois-pontos e caracteres de controle (inclusive NUL) ou de quebra de
+  linha, como no chat. A verificação é feita sobre o texto recebido, antes
+  de qualquer normalização, para que uma entrada proibida nunca vire outra
+  aceita."""
   if not path:
     raise ForbiddenPath("o caminho está vazio")
+  try:
+    path.encode("utf-8")
+  except UnicodeEncodeError:
+    raise ForbiddenPath("o caminho não pode ser codificado em UTF-8") from None
   if path.startswith("/"):
     raise ForbiddenPath("caminhos absolutos não são permitidos")
   if "\\" in path or ":" in path:
     raise ForbiddenPath("o caminho não pode conter barra invertida nem dois-pontos")
-  if any(unicodedata.category(char) == "Cc" for char in path):
-    raise ForbiddenPath("o caminho contém caracteres de controle")
+  if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in path):
+    raise ForbiddenPath("o caminho contém caracteres de controle ou quebra de linha")
   if any(part in ("", ".", "..") for part in path.split("/")):
     raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
 

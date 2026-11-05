@@ -1,6 +1,7 @@
 """Proteção de caminhos: a raiz compartilhada no servidor e a raiz de
 downloads no cliente, pela fronteira TCP e com diretórios temporários."""
 import hashlib
+import json
 import os
 import select
 import socket
@@ -16,6 +17,13 @@ from tests.support import (CAN_EXCHANGE, LogRecorder, OutputReader, Swapper, ins
 from tests.test_download import CONCLUDED, files_under, share
 
 FORBIDDEN = "Caminho inválido ou proibido"
+
+
+def request_frame(path):
+  """FILE_REQUEST de `path` com o JSON escapado em ASCII, que também é UTF-8
+  e permite levar ao servidor até um substituto isolado, como `\\udc80`."""
+  payload = json.dumps({"path": path}).encode("ascii")
+  return p.HEADER.pack(p.FILE_REQUEST, len(payload)) + payload
 
 
 class ContainmentTest(unittest.TestCase):
@@ -98,7 +106,7 @@ class SharedRootTest(unittest.TestCase):
     client = self.connect()
 
     for path in paths:
-      client.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
+      client.sendall(request_frame(path))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, (path, error))
       self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code), path)
@@ -127,6 +135,19 @@ class SharedRootTest(unittest.TestCase):
     for path, content in accepted.items():
       client.sendall(p.encode(p.FILE_REQUEST, {"path": path}))
       self.assertEqual(self.receive_whole_file(client), content, path)
+
+  def test_path_that_is_not_utf_8_text_or_breaks_the_line_is_forbidden_even_when_the_name_exists(self):
+    """Um JSON válido pode trazer, escapados, os separadores de linha e de
+    parágrafo do Unicode, que quebram a linha como a quebra de linha
+    comum, e substitutos isolados, que não formam texto UTF-8 e não podem
+    virar outro nome em silêncio. Todos recebem PATH_FORBIDDEN, mesmo que
+    exista um arquivo com o nome pedido, e a sessão continua."""
+    for name in ("arq\u2028uivo", "arq\u2029uivo"):
+      share(self.shared_root, name, b"existe")
+    self.start_server()
+
+    paths = ["arq\u2028uivo", "arq\u2029uivo", "arq\udc80uivo", "arq\ud800uivo", "aulas/\udcff"]
+    self.assertRefusedKeepingTheSession(paths, p.PATH_FORBIDDEN)
 
   def test_symbolic_link_as_the_file_is_forbidden_wherever_it_points(self):
     share(self.shared_root, "aulas/resumo.pdf", b"resumo")
