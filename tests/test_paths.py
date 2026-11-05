@@ -319,6 +319,24 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(files_under(self.downloads_root), ["outro.txt"])
     self.assertEqual(os.readlink(self.local("aulas")), self.outside)
 
+  def test_object_in_the_place_of_a_download_folder_is_preserved(self):
+    """Antes do pedido, a recusa é local; depois dele, o download falha."""
+    with open(self.local("aulas"), "wb") as file:
+      file.write(b"arquivo, nao pasta")
+
+    self.assertRefusedLocally(["aulas/resumo.pdf", "aulas/2024/resumo.pdf"], "já existe")
+    self.request("notas/resumo.pdf")
+    with open(self.local("notas"), "wb") as file:
+      file.write(b"surgiu depois do pedido")
+    self.serve(b"conteudo")
+
+    self.output.wait_for("Download de notas/resumo.pdf falhou")
+    self.assertEqual(self.output.text.count(CONCLUDED), 1)
+    for name, content in [("aulas", b"arquivo, nao pasta"), ("notas", b"surgiu depois do pedido")]:
+      with open(self.local(name), "rb") as file:
+        self.assertEqual(file.read(), content)
+    self.assertEqual(files_under(self.downloads_root), ["aulas", "notas", "permitido.txt"])
+
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
     with open(self.local("meu.txt"), "wb") as file:
       file.write(b"meu")

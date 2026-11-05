@@ -48,16 +48,25 @@ def parse_port(text):
   return port
 
 
+class DestinationTaken(Exception):
+  """Já existe algo no destino local ou no lugar de uma de suas pastas; o
+  objeto existente é preservado."""
+
+
 def check_destination(root, path):
   """Destino local de `path`, um caminho já aceito por
   p.check_relative_path, sob a raiz de downloads `root`. Levanta
   p.ForbiddenPath se a raiz, uma pasta existente do caminho ou o próprio
-  destino for link simbólico; pastas que ainda não existem são aceitas."""
+  destino for link simbólico, e DestinationTaken se já houver algo no
+  destino ou algo que não é pasta no lugar de uma delas; pastas que ainda
+  não existem são aceitas."""
   parts = path.split("/")
   download_folder(root, parts[:-1])
   destination = os.path.join(root, *parts)
   if os.path.islink(destination):
     raise p.ForbiddenPath(f"{path} é um link simbólico")
+  if os.path.lexists(destination):
+    raise DestinationTaken(f"já existe algo em {destination}; o objeto existente foi preservado")
   return destination
 
 
@@ -67,7 +76,8 @@ def download_folder(root, names, create=False):
   criada quando `create` é verdadeiro; senão, devolve None. Cada pasta,
   existente ou recém-criada, é examinada antes de passar à seguinte, e a
   última precisa estar contida na raiz. Levanta p.ForbiddenPath para link
-  simbólico ou saída da raiz."""
+  simbólico ou saída da raiz e DestinationTaken se algo que não é pasta
+  ocupar o lugar de uma delas."""
   folder = root
   for depth in range(len(names) + 1):
     if depth:
@@ -84,6 +94,8 @@ def download_folder(root, names, create=False):
     if stat.S_ISLNK(mode):
       where = "/".join(names[:depth]) if depth else "a raiz de downloads"
       raise p.ForbiddenPath(f"{where} é um link simbólico")
+    if not stat.S_ISDIR(mode):
+      raise DestinationTaken(f"já existe algo em {folder} que não é uma pasta; o objeto existente foi preservado")
   p.check_inside(root, folder)
   return folder
 
@@ -119,6 +131,9 @@ class Download:
       folder = download_folder(self._downloads_root, self.path.split("/")[:-1], create=True)
     except p.ForbiddenPath as error:
       self._failure = f"caminho inválido ou proibido: {error}"
+      return
+    except DestinationTaken as error:
+      self._failure = str(error)
       return
     descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
     self._temp = os.fdopen(descriptor, "wb")
@@ -228,8 +243,8 @@ class Client:
     except p.ForbiddenPath as error:
       show(f"Caminho inválido ou proibido: {error}")
       return
-    if os.path.lexists(destination):
-      show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")
+    except DestinationTaken as error:
+      show(f"Download recusado: {error}.")
       return
     self._download = Download(path, destination, self._downloads_root)
     try:
