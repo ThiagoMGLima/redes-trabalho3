@@ -5,6 +5,7 @@ import os
 import queue
 import select
 import socket
+import stat
 import sys
 import threading
 
@@ -30,6 +31,32 @@ def parse_port(text):
   if not 1024 < port <= 65535:
     raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
   return port
+
+
+class FileRefused(Exception):
+  """Recusa normal de um FILE_REQUEST: `code` é o código estável do ERROR e
+  a mensagem é a explicação legível."""
+
+  def __init__(self, code, message):
+    super().__init__(message)
+    self.code = code
+
+
+def open_shared_file(root, path):
+  """Abre para leitura binária o arquivo `path`, relativo à raiz
+  compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
+  sintaxe proibida ou link simbólico e NOT_FOUND para arquivo inexistente."""
+  try:
+    p.check_relative_path(path)
+  except p.ForbiddenPath as error:
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+  target = os.path.join(root, *path.split("/"))
+  try:
+    if stat.S_ISLNK(os.lstat(target).st_mode):
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
+    return open(target, "rb")
+  except (FileNotFoundError, NotADirectoryError):
+    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
 
 
 class FileTransfer:
@@ -349,14 +376,9 @@ class Server:
       )
       return
     try:
-      p.check_relative_path(path)
-    except p.ForbiddenPath as error:
-      self._refuse(session, "FILE_REQUEST", p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}")
-      return
-    try:
-      file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
-    except (FileNotFoundError, NotADirectoryError):
-      self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
+      file = open_shared_file(self._shared_root, path)
+    except FileRefused as refusal:
+      self._refuse(session, "FILE_REQUEST", refusal.code, str(refusal))
       return
     session.send_file(file)
 
