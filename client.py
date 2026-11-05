@@ -22,8 +22,14 @@ OPTIONS = {
 }
 
 
+_output_lock = threading.Lock()
+
+
 def show(text):
-  print(text, flush=True)
+  """Escreve uma linha inteira no terminal; a principal e a receptora não
+  intercalam suas linhas."""
+  with _output_lock:
+    print(text, flush=True)
 
 
 def parse_port(text):
@@ -101,6 +107,11 @@ class Client:
       pass
     show("Sessão encerrada.")
 
+  def _show_received(self, line):
+    """Exibe sem esperar o teclado: em nova linha, mesmo com um prompt ou
+    texto parcialmente digitado na linha atual."""
+    show("\n" + line)
+
   def _receive_loop(self):
     while True:
       try:
@@ -109,6 +120,8 @@ class Client:
         message = None
       if message is None:
         break
+      if message.type == p.CHAT and isinstance(message.content, dict):
+        self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
     self._disconnected.set()
     if not self._leaving.is_set():
       show("\nDesconectado do servidor. Pressione Enter para sair.")

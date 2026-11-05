@@ -84,6 +84,25 @@ class ClientSessionTest(unittest.TestCase):
     self.wait_for_prompts(2)
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_received_messages_appear_on_a_new_line_while_waiting_for_the_keyboard(self):
+    self.wait_for_prompts(1)
+    peer = self.connect_peer()
+
+    peer.sendall(p.encode(p.CHAT, {"text": "chegou no menu"}))
+    self.output.wait_for("\n[Cliente 2] chegou no menu\n")
+
+    self.type_line("3")
+    self.output.wait_for(CHAT_PROMPT)
+    self.client.stdin.write("parcial")
+    self.client.stdin.flush()
+    self.server.broadcast("aviso 😀")
+    self.output.wait_for("\n[Servidor] aviso 😀\n")
+
+    self.type_line("mente digitado")
+    self.assertEqual(receive_within(peer).content["origin"], "Servidor")
+    self.assertEqual(receive_within(peer), (p.CHAT, {"origin": "Cliente 1", "text": "parcialmente digitado"}))
+    self.output.wait_for("[Você] parcialmente digitado")
+
   def test_client_reports_disconnection_when_the_server_ends_the_session(self):
     self.wait_for_prompts(1)
     self.log.wait_for("Conectado:")
