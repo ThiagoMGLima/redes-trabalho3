@@ -9,6 +9,7 @@ import protocol as p
 
 HOST = ""
 PORT = 50007
+SERVER_ORIGIN = "Servidor"
 
 
 def terminal_log(line):
@@ -160,11 +161,12 @@ class Server:
     self._acceptor = threading.Thread(target=self._accept_loop, name="aceitação")
     self._acceptor.start()
 
-  def wait(self):
-    """Bloqueia até o encerramento; acorda periodicamente para que Ctrl+C
-    seja atendido em qualquer plataforma."""
-    while self._acceptor.is_alive():
-      self._acceptor.join(0.5)
+  def broadcast(self, text):
+    """Broadcast do servidor: entrega o texto do operador a todos os clientes
+    conectados com origem Servidor. Levanta p.InvalidChatText se o texto não
+    cumprir as regras do chat, sem enviar nada."""
+    p.check_chat_text(text)
+    self._deliver(SERVER_ORIGIN, text)
 
   def shutdown(self):
     with self._lock:
@@ -232,20 +234,34 @@ class Server:
     except p.InvalidChatText as error:
       self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
       return
-    self._forward_chat(session, text)
+    self._deliver(session.name, text, skip=session)
 
   def _refuse(self, session, operation, code, message):
     """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""
     session.send(p.ERROR, {"operation": operation, "code": code, "message": message})
 
-  def _forward_chat(self, sender, text):
-    """Exibe no terminal e encaminha aos demais clientes, com a origem
-    atribuída pelo servidor à sessão remetente."""
-    self._log(f"[{sender.name}] {text}")
+  def _deliver(self, origin, text, skip=None):
+    """Exibe no terminal e enfileira para os clientes conectados, exceto
+    `skip`; a origem é sempre a atribuída pelo servidor."""
+    self._log(f"[{origin}] {text}")
     with self._lock:
-      recipients = [session for session in self._sessions if session is not sender]
+      recipients = [session for session in self._sessions if session is not skip]
     for session in recipients:
-      session.send(p.CHAT, {"origin": sender.name, "text": text})
+      session.send(p.CHAT, {"origin": origin, "text": text})
+
+
+def read_operator_input(server):
+  """Envia cada linha digitada pelo operador como broadcast do servidor até
+  o fim da entrada; texto fora das regras é recusado localmente."""
+  while True:
+    try:
+      line = input()
+    except EOFError:
+      return
+    try:
+      server.broadcast(line)
+    except p.InvalidChatText as error:
+      terminal_log(f"Mensagem recusada: {error}")
 
 
 def main():
@@ -259,9 +275,10 @@ def main():
   except OSError as error:
     terminal_log(f"Não foi possível escutar na porta TCP {args.port}: {error}")
     sys.exit(1)
-  terminal_log(f"Servidor escutando na porta TCP {server.address[1]}. Ctrl+C encerra.")
+  terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
+  terminal_log("Digite uma mensagem e Enter para enviá-la a todos os clientes. Ctrl+C ou EOF encerra.")
   try:
-    server.wait()
+    read_operator_input(server)
   except KeyboardInterrupt:
     terminal_log("Ctrl+C recebido: encerrando o servidor")
   finally:

@@ -98,22 +98,66 @@ class ShutdownTest(ServerTestCase):
       socket.create_connection(address, timeout=1).close()
 
 
-@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
-class CtrlCTest(unittest.TestCase):
-  def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
+class ServerProcessTestCase(unittest.TestCase):
+  """O servidor roda como no terminal; a entrada padrão é a do operador."""
+
+  def start_server_process(self):
     port = free_port()
     process = subprocess.Popen(
       [sys.executable, "-u", SERVER_SCRIPT, str(port)],
-      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     output = OutputReader(process.stdout)
     self.addCleanup(output.close)
     self.addCleanup(process.wait, 5)
     self.addCleanup(process.kill)
+    self.addCleanup(process.stdin.close)
     output.wait_for(str(port))
+    return process, output, port
+
+  def connect(self, port, output):
     client = socket.create_connection(("127.0.0.1", port), timeout=5)
     self.addCleanup(client.close)
     output.wait_for(f"Conectado: {address_of(client)}")
+    return client
+
+  def type_line(self, process, line):
+    process.stdin.write(line + "\n")
+    process.stdin.flush()
+
+
+class OperatorBroadcastTest(ServerProcessTestCase):
+  def test_operator_message_reaches_every_connected_client_with_origin_servidor(self):
+    process, output, port = self.start_server_process()
+    first = self.connect(port, output)
+    second = self.connect(port, output)
+
+    self.type_line(process, "  Aviso: ação às 10h 😀 ")
+
+    expected = (p.CHAT, {"origin": "Servidor", "text": "  Aviso: ação às 10h 😀 "})
+    self.assertEqual(receive_within(first), expected)
+    self.assertEqual(receive_within(second), expected)
+
+  def test_operator_text_outside_the_rules_is_refused_locally_and_not_sent(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+    refused = ["", "   ", "com\ttabulação", "escape \x1b[31m", "😀" * 256 + "a"]
+
+    for text in refused:
+      self.type_line(process, text)
+    self.type_line(process, "😀" * 256)
+
+    self.assertEqual(receive_within(client), (p.CHAT, {"origin": "Servidor", "text": "😀" * 256}))
+    if not wait_until(lambda: output.text.count("Mensagem recusada") == len(refused)):
+      raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
+
+
+@unittest.skipUnless(hasattr(signal, "SIGINT") and os.name == "posix", "Ctrl+C simulado com SIGINT")
+class CtrlCTest(ServerProcessTestCase):
+  def test_ctrl_c_stops_accepting_and_ends_existing_sessions(self):
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
 
     process.send_signal(signal.SIGINT)
 
