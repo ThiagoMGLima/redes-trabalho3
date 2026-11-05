@@ -93,6 +93,11 @@ class Client:
     if self._disconnected.is_set():
       return
     try:
+      p.check_chat_text(text)
+    except p.InvalidChatText as error:
+      show(f"Mensagem recusada: {error}")
+      return
+    try:
       p.send_message(self._sock, p.CHAT, {"text": text})
     except (p.ProtocolError, OSError) as error:
       show(f"Não foi possível enviar a mensagem: {error}")

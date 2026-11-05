@@ -84,6 +84,20 @@ class ClientSessionTest(unittest.TestCase):
     self.wait_for_prompts(2)
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_text_outside_the_rules_is_refused_locally_without_sending(self):
+    self.wait_for_prompts(1)
+    peer = self.connect_peer()
+    refused = ["", "   ", "com\ttabulação", "escape \x1b[31m", "😀" * 256 + "a", "a" * 1023 + "é"]
+
+    for text in refused + ["😀" * 256]:
+      self.type_line("3")
+      self.type_line(text)
+
+    self.assertEqual(receive_within(peer), (p.CHAT, {"origin": "Cliente 1", "text": "😀" * 256}))
+    self.wait_for_prompts(len(refused) + 2)
+    self.assertEqual(self.output.text.count("Mensagem recusada"), len(refused))
+    self.assertEqual(self.output.text.count("[Você]"), 1)
+
   def test_received_messages_appear_on_a_new_line_while_waiting_for_the_keyboard(self):
     self.wait_for_prompts(1)
     peer = self.connect_peer()
