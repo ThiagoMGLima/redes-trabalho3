@@ -238,6 +238,14 @@ class ClientDownloadTest(unittest.TestCase):
     self.assertEqual(os.listdir(self.downloads_root), ["presente.txt"])
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_empty_file_is_published_empty(self):
+    share(self.shared_root, "vazio.txt", b"")
+
+    self.download("vazio.txt")
+
+    self.assertEqual(files_under(self.downloads_root), ["vazio.txt"])
+    self.assertEqual(os.path.getsize(self.downloaded("vazio.txt")), 0)
+
   def test_files_with_any_name_are_published_preserving_their_subfolders(self):
     names = [
       "aulas/Revisão 2.pdf", "aulas/2024/notas finais da ação.txt", ".exemplo", "arquivo", "teste.bin",
