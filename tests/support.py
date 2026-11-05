@@ -1,9 +1,13 @@
+import os
 import select
+import shutil
 import socket
 import threading
 import time
 
 import protocol as p
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def receive_within(sock, timeout=5.0):
@@ -75,6 +79,16 @@ def tcp_pair(small_buffers=False):
     near.connect(listener.getsockname())
     far, _ = listener.accept()
   return near, far
+
+
+def install_programs(directory):
+  """Copia os programas do projeto para `directory`. A cópia usa as raízes
+  files/ e downloads/ ao lado dela, não as do projeto."""
+  os.makedirs(directory, exist_ok=True)
+  for name in os.listdir(PROJECT_ROOT):
+    if name.endswith(".py"):
+      shutil.copy(os.path.join(PROJECT_ROOT, name), directory)
+  return directory
 
 
 def free_port():

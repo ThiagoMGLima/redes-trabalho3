@@ -1,4 +1,7 @@
 import argparse
+import collections
+import hashlib
+import os
 import queue
 import select
 import socket
@@ -10,6 +13,7 @@ import protocol as p
 HOST = ""
 PORT = 50007
 SERVER_ORIGIN = "Servidor"
+SHARED_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
 MAX_CLIENTS = 10
 MAX_PENDING = 64
 
@@ -28,17 +32,49 @@ def parse_port(text):
   return port
 
 
+class FileTransfer:
+  """Envio incremental de um arquivo aberto em modo binário: FILE_META com o
+  tamanho, blocos FILE_DATA de até CHUNK_SIZE bytes (só o último pode ser
+  menor) e FILE_END com o SHA-256 calculado sobre os blocos lidos. O arquivo
+  nunca é lido por inteiro; cada bloco é lido quando vai ser enviado."""
+
+  def __init__(self, file):
+    self._file = file
+    self._messages = self._read()
+    self.finished = False
+
+  def next_message(self):
+    """Próxima mensagem do envio. Ao entregar o FILE_END, fecha o arquivo e
+    marca `finished`."""
+    message = next(self._messages)
+    if message[0] == p.FILE_END:
+      self.finished = True
+      self.close()
+    return message
+
+  def close(self):
+    self._file.close()
+
+  def _read(self):
+    yield p.FILE_META, {"size": os.fstat(self._file.fileno()).st_size}
+    digest = hashlib.sha256()
+    while block := self._file.read(p.CHUNK_SIZE):
+      digest.update(block)
+      yield p.FILE_DATA, block
+    yield p.FILE_END, {"sha256": digest.hexdigest()}
+
+
 class Session:
   """Atendimento de uma conexão aceita.
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
-  da sessão com `send`, que nunca espera espaço: a fila guarda até
-  MAX_PENDING mensagens pendentes e, cheia, encerra só esta sessão. `close` é
-  idempotente e pode ser chamado por qualquer thread: a primeira chamada
-  descarta a fila, interrompe as duas threads e notifica `on_close` uma única
-  vez. O socket é fechado pela thread de atendimento depois que a escritora
-  termina.
+  da sessão com `send` e arquivos com `send_file`, que nunca esperam espaço:
+  a fila guarda até MAX_PENDING mensagens pendentes e, cheia, encerra só esta
+  sessão. `close` é idempotente e pode ser chamado por qualquer thread: a
+  primeira chamada descarta a fila, fecha os arquivos pendentes, interrompe
+  as duas threads e notifica `on_close` uma única vez. O socket é fechado
+  pela thread de atendimento depois que a escritora termina.
   """
 
   _STOP = object()
@@ -62,15 +98,29 @@ class Session:
     self._reader.start()
 
   def send(self, msg_type, content):
+    self._enqueue((msg_type, content))
+
+  def send_file(self, file):
+    """Enfileira o envio incremental de `file`, aberto em modo binário; a
+    escritora o lê bloco a bloco, alternando com as mensagens da fila. A
+    sessão passa a ser dona do arquivo e o fecha ao terminar o envio ou ao
+    ser encerrada."""
+    transfer = FileTransfer(file)
+    if not self._enqueue(transfer):
+      transfer.close()
+
+  def _enqueue(self, item):
+    """Enfileira sem esperar espaço e informa se o item entrou na fila."""
     with self._lock:
       if self._closed:
-        return
+        return False
       try:
-        self._outgoing.put_nowait((msg_type, content))
-        return
+        self._outgoing.put_nowait(item)
+        return True
       except queue.Full:
         pass
     self.close(f"fila de saída cheia: {MAX_PENDING} mensagens pendentes")
+    return False
 
   def close(self, reason):
     with self._lock:
@@ -95,9 +145,11 @@ class Session:
   def _discard_outgoing(self):
     while True:
       try:
-        self._outgoing.get_nowait()
+        item = self._outgoing.get_nowait()
       except queue.Empty:
         return
+      if isinstance(item, FileTransfer):
+        item.close()
 
   def _read_loop(self):
     reason = "falha inesperada no atendimento"
@@ -135,23 +187,51 @@ class Session:
       self.close(reason)
 
   def _send_until_stopped(self):
-    while True:
-      item = self._outgoing.get()
-      if item is self._STOP:
-        return "sessão encerrada"
-      try:
-        p.send_message(self.sock, *item, timeout=self._send_timeout)
-      except p.FrameTimeout:
-        return "prazo de envio expirado"
-      except OSError as error:
-        return f"falha no envio: {error}"
+    """Sem arquivo ativo, espera a fila. Com arquivo ativo, alterna uma
+    mensagem da fila, se houver, e a próxima mensagem do arquivo; cada frame
+    é enviado inteiro antes do seguinte. Um arquivo enfileirado durante outro
+    envio começa depois do FILE_END do atual."""
+    active = None
+    files = collections.deque()
+    try:
+      while True:
+        item = self._next_item(wait=active is None and not files)
+        if item is self._STOP:
+          return "sessão encerrada"
+        if isinstance(item, FileTransfer):
+          files.append(item)
+        elif item is not None:
+          p.send_message(self.sock, *item, timeout=self._send_timeout)
+        if active is None and files:
+          active = files.popleft()
+        if active is not None:
+          p.send_message(self.sock, *active.next_message(), timeout=self._send_timeout)
+          if active.finished:
+            active = None
+    except p.FrameTimeout:
+      return "prazo de envio expirado"
+    except OSError as error:
+      return f"falha no envio: {error}"
+    finally:
+      for transfer in [active, *files]:
+        if transfer is not None:
+          transfer.close()
+
+  def _next_item(self, wait):
+    if wait:
+      return self._outgoing.get()
+    try:
+      return self._outgoing.get_nowait()
+    except queue.Empty:
+      return None
 
 
 class Server:
   def __init__(self, host=HOST, port=PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
-               log=terminal_log):
+               log=terminal_log, shared_root=SHARED_ROOT):
     self._host = host
     self._port = port
+    self._shared_root = shared_root
     self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._log = log
@@ -242,6 +322,9 @@ class Server:
     if message.type == p.CHAT:
       self._receive_chat(session, message.content)
       return
+    if message.type == p.FILE_REQUEST:
+      self._receive_file_request(session, message.content)
+      return
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
 
   def _receive_chat(self, session, content):
@@ -255,6 +338,27 @@ class Server:
       self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
       return
     self._deliver(session.name, text, skip=session)
+
+  def _receive_file_request(self, session, content):
+    """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
+    escritora da sessão, que o envia bloco a bloco."""
+    path = content.get("path") if isinstance(content, dict) else None
+    if not isinstance(path, str):
+      self._refuse(
+        session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
+      )
+      return
+    try:
+      p.check_relative_path(path)
+    except p.ForbiddenPath as error:
+      self._refuse(session, "FILE_REQUEST", p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}")
+      return
+    try:
+      file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
+    except (FileNotFoundError, NotADirectoryError):
+      self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
+      return
+    session.send_file(file)
 
   def _refuse(self, session, operation, code, message):
     """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""

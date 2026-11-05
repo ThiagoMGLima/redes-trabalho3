@@ -40,6 +40,8 @@ RECEIVE_TIMEOUT = 10.0
 
 MAX_CHAT_BYTES = 1024
 
+NOT_FOUND = "NOT_FOUND"
+PATH_FORBIDDEN = "PATH_FORBIDDEN"
 INVALID_CHAT = "INVALID_CHAT"
 INVALID_REQUEST = "INVALID_REQUEST"
 
@@ -64,6 +66,10 @@ class FrameTimeout(ProtocolError):
 
 class InvalidChatText(ValueError):
   """Texto recusado pelas regras do chat coletivo; a mensagem traz o motivo."""
+
+
+class ForbiddenPath(ValueError):
+  """Caminho de arquivo com sintaxe proibida; a mensagem traz o motivo."""
 
 
 def encode(msg_type, content):
@@ -104,6 +110,24 @@ def check_chat_text(text):
     raise InvalidChatText(f"a mensagem tem {size} bytes; o limite é {MAX_CHAT_BYTES}")
   if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in text):
     raise InvalidChatText("a mensagem contém caracteres de controle ou quebra de linha")
+
+
+def check_relative_path(path):
+  """Aceita um caminho relativo à raiz, com `/` como separador. Levanta
+  ForbiddenPath para caminho vazio ou absoluto, componentes vazios, `.` ou
+  `..`, barra invertida, dois-pontos e caracteres de controle (inclusive NUL).
+  A verificação é feita sobre o texto recebido, antes de qualquer
+  normalização, para que uma entrada proibida nunca vire outra aceita."""
+  if not path:
+    raise ForbiddenPath("o caminho está vazio")
+  if path.startswith("/"):
+    raise ForbiddenPath("caminhos absolutos não são permitidos")
+  if "\\" in path or ":" in path:
+    raise ForbiddenPath("o caminho não pode conter barra invertida nem dois-pontos")
+  if any(unicodedata.category(char) == "Cc" for char in path):
+    raise ForbiddenPath("o caminho contém caracteres de controle")
+  if any(part in ("", ".", "..") for part in path.split("/")):
+    raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
 
 
 def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):

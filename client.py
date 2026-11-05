@@ -1,12 +1,16 @@
 import argparse
+import hashlib
+import os
 import socket
 import sys
+import tempfile
 import threading
 
 import protocol as p
 
 HOST = "127.0.0.1"
 PORT = 50007
+DOWNLOADS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 
 MENU = """
 Menu:
@@ -15,6 +19,7 @@ Menu:
   3 - Chat"""
 PROMPT = "Escolha uma opção: "
 CHAT_PROMPT = "Mensagem: "
+FILE_PROMPT = "Caminho do arquivo: "
 OPTIONS = {
   "1": "sair", "sair": "sair",
   "2": "arquivo", "arquivo": "arquivo",
@@ -42,12 +47,65 @@ def parse_port(text):
   return port
 
 
+class DownloadFailed(Exception):
+  """Download não publicado; a mensagem traz o motivo."""
+
+
+class Download:
+  """Download ativo, do pedido até a publicação. A receptora grava cada bloco
+  recebido em um temporário na pasta do destino e calcula o SHA-256 nos
+  blocos; o destino final só recebe o arquivo verificado."""
+
+  def __init__(self, path, destination):
+    self.path = path
+    self.destination = destination
+    self.started = False
+    self._size = None
+    self._received = 0
+    self._digest = hashlib.sha256()
+    self._temp = None
+    self._temp_path = None
+
+  def start(self, size):
+    self.started = True
+    self._size = size
+    folder = os.path.dirname(self.destination)
+    os.makedirs(folder, exist_ok=True)
+    descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
+    self._temp = os.fdopen(descriptor, "wb")
+
+  def write(self, block):
+    self._temp.write(block)
+    self._temp.flush()
+    self._digest.update(block)
+    self._received += len(block)
+
+  def finish(self, sha256):
+    """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
+    FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
+    Levanta DownloadFailed com o motivo; o temporário é sempre removido."""
+    try:
+      self._temp.close()
+      if self._received != self._size:
+        raise DownloadFailed(f"recebidos {self._received} bytes, mas o servidor anunciou {self._size}")
+      if sha256 != self._digest.hexdigest():
+        raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
+      try:
+        os.link(self._temp_path, self.destination)
+      except FileExistsError:
+        raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
+    finally:
+      os.unlink(self._temp_path)
+
+
 class Client:
   """Sessão do participante. A thread principal cuida do teclado e dos
-  envios; a receptora é a única leitora do socket."""
+  envios; a receptora é a única leitora do socket e grava os downloads."""
 
-  def __init__(self, sock):
+  def __init__(self, sock, downloads_root=DOWNLOADS_ROOT):
     self._sock = sock
+    self._downloads_root = downloads_root
+    self._download = None
     self._leaving = threading.Event()
     self._disconnected = threading.Event()
     self._receiver = threading.Thread(target=self._receive_loop, name="receptora")
@@ -82,7 +140,7 @@ class Client:
       if option == "chat":
         self._chat()
       elif option == "arquivo":
-        show("Opção ainda não disponível.")
+        self._request_file()
       else:
         show("Opção inválida.")
 
@@ -104,6 +162,31 @@ class Client:
       return
     show(f"[Você] {text}")
 
+  def _request_file(self):
+    """Pede um arquivo da raiz compartilhada e volta ao menu; a receptora
+    grava o download, então o menu continua disponível durante a
+    transferência."""
+    path = input(FILE_PROMPT)
+    if self._disconnected.is_set():
+      return
+    try:
+      p.check_relative_path(path)
+    except p.ForbiddenPath as error:
+      show(f"Caminho inválido ou proibido: {error}")
+      return
+    destination = os.path.join(self._downloads_root, *path.split("/"))
+    if os.path.lexists(destination):
+      show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")
+      return
+    self._download = Download(path, destination)
+    try:
+      p.send_message(self._sock, p.FILE_REQUEST, {"path": path})
+    except (p.ProtocolError, OSError) as error:
+      self._download = None
+      show(f"Não foi possível solicitar o arquivo: {error}")
+      return
+    show(f"Arquivo {path} solicitado.")
+
   def _quit(self):
     self._leaving.set()
     try:
@@ -117,6 +200,33 @@ class Client:
     texto parcialmente digitado na linha atual."""
     show("\n" + line)
 
+  def _receive_error(self, error):
+    """Recusa normal do servidor: a sessão continua. Uma recusa de
+    FILE_REQUEST encerra o download que ainda aguardava FILE_META."""
+    download = self._download
+    if error.get("operation") == "FILE_REQUEST" and download is not None and not download.started:
+      self._download = None
+    self._show_received(f"Erro do servidor em {error.get('operation')}: {error.get('message')} ({error.get('code')})")
+
+  def _receive_download(self, message):
+    download = self._download
+    if download is None:
+      return
+    fields = message.content if isinstance(message.content, dict) else {}
+    if message.type == p.FILE_META:
+      download.start(fields.get("size"))
+    elif message.type == p.FILE_DATA:
+      download.write(message.content)
+    else:
+      try:
+        download.finish(fields.get("sha256"))
+      except DownloadFailed as error:
+        outcome = f"Download de {download.path} falhou: {error}. Nada foi publicado."
+      else:
+        outcome = f"Download concluído: {download.path} publicado em {download.destination}"
+      self._download = None
+      self._show_received(outcome)
+
   def _receive_loop(self):
     while True:
       try:
@@ -127,6 +237,10 @@ class Client:
         break
       if message.type == p.CHAT and isinstance(message.content, dict):
         self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
+      elif message.type == p.ERROR and isinstance(message.content, dict):
+        self._receive_error(message.content)
+      elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
+        self._receive_download(message)
     self._disconnected.set()
     if not self._leaving.is_set():
       show("\nDesconectado do servidor. Pressione Enter para sair.")
