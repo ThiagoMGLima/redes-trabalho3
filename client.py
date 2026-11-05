@@ -168,7 +168,7 @@ def _failure_reason(error):
     return f"caminho inválido ou proibido: {error}"
   if isinstance(error, DestinationTaken):
     return str(error)
-  return f"não foi possível preparar a pasta de destino ({error.strerror})"
+  return f"não foi possível acessar a pasta de destino ({error.strerror})"
 
 
 class DownloadFailed(Exception):
@@ -211,10 +211,10 @@ class Download:
     self._size = size
     try:
       self._folder = open_download_folder(self._downloads_root, self._folders, create=True)
+      descriptor, self._temp_name = _create_temporary(self._folder)
     except (p.ForbiddenPath, DestinationTaken, OSError) as error:
       self._failure = _failure_reason(error)
       return
-    descriptor, self._temp_name = _create_temporary(self._folder)
     self._identity = _identity(os.fstat(descriptor))
     self._temp = os.fdopen(descriptor, "wb")
 

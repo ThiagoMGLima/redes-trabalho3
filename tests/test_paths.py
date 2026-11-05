@@ -455,6 +455,23 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertFalse(os.path.lexists(self.local("aulas/resumo.pdf")))
     self.assertReceiverContinues()
 
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_destination_folder_that_does_not_accept_the_temporary_fails_the_download_writing_nothing(self):
+    """Depois do pedido, a pasta do destino deixa de aceitar escrita: o
+    temporário não pode ser criado, nada é gravado, o download falha ao
+    receber FILE_END e a receptora continua."""
+    os.mkdir(self.local("aulas"))
+    self.addCleanup(os.chmod, self.local("aulas"), 0o700)
+    self.request("aulas/resumo.pdf")
+    os.chmod(self.local("aulas"), 0o500)
+
+    self.serve(b"conteudo")
+
+    self.output.wait_for("Download de aulas/resumo.pdf falhou")
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertEqual(os.listdir(self.local("aulas")), [])
+    self.assertReceiverContinues()
+
   @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
   def test_download_folder_swapped_with_a_link_during_downloads_leaves_nothing_outside_the_root(self):
     """Uma thread troca sem parar a pasta `aulas` por um link para fora da
