@@ -9,6 +9,7 @@ from server import Server
 from tests.support import LogRecorder, receive_within
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+SIZE_12_MIB = 12_582_912
 
 
 class ServerDownloadTest(unittest.TestCase):
@@ -24,9 +25,15 @@ class ServerDownloadTest(unittest.TestCase):
     self.server.start()
     self.addCleanup(self.server.shutdown)
 
-  def connect(self):
-    sock = socket.create_connection(self.server.address, timeout=5)
+  def connect(self, small_receive_buffer=False):
+    """Com buffer de recepção pequeno, o servidor só avança alguns blocos
+    além do que o cliente já leu."""
+    sock = socket.socket()
     self.addCleanup(sock.close)
+    if small_receive_buffer:
+      sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sock.settimeout(5)
+    sock.connect(self.server.address)
     host, port = sock.getsockname()[:2]
     self.log.wait_for(f"Conectado: {host}:{port}")
     return sock
@@ -42,16 +49,21 @@ class ServerDownloadTest(unittest.TestCase):
       file.write(content)
     return hashlib.sha256(content).hexdigest()
 
-  def receive_download(self, sock):
+  def receive_download(self, sock, blocks=None):
     """Recebe FILE_META, os blocos e FILE_END de um pedido; devolve o tamanho
-    anunciado, os blocos e o hash anunciado."""
-    meta = receive_within(sock)
-    self.assertEqual(meta.type, p.FILE_META, meta)
-    blocks = []
+    anunciado, os blocos e o hash anunciado. Com `blocks`, o FILE_META e
+    esses primeiros blocos já foram recebidos."""
+    if blocks is None:
+      meta = receive_within(sock)
+      self.assertEqual(meta.type, p.FILE_META, meta)
+      size = meta.content["size"]
+      blocks = []
+    else:
+      size = None
     while (message := receive_within(sock)).type == p.FILE_DATA:
       blocks.append(message.content)
     self.assertEqual(message.type, p.FILE_END, message)
-    return meta.content["size"], blocks, message.content["sha256"]
+    return size, blocks, message.content["sha256"]
 
   def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
     client = self.connect()
@@ -87,6 +99,27 @@ class ServerDownloadTest(unittest.TestCase):
     self.request(client, "vazio.txt")
 
     self.assertEqual(self.receive_download(client), (0, [], EMPTY_SHA256))
+
+  def test_each_block_is_read_and_hashed_when_sent_without_reading_the_file_beforehand(self):
+    """O fim de um arquivo de 12 MiB muda depois que o cliente recebe o
+    primeiro bloco. Os blocos e o hash recebidos refletem a mudança: o
+    servidor não leu nem calculou o hash do arquivo inteiro antes de enviar."""
+    original = os.urandom(SIZE_12_MIB)
+    self.share("grande.bin", original)
+    client = self.connect(small_receive_buffer=True)
+
+    self.request(client, "grande.bin")
+    self.assertEqual(receive_within(client), (p.FILE_META, {"size": SIZE_12_MIB}))
+    first = receive_within(client)
+    changed_tail = bytes(b ^ 0xFF for b in original[-p.CHUNK_SIZE:])
+    with open(os.path.join(self.shared_root, "grande.bin"), "r+b") as file:
+      file.seek(-p.CHUNK_SIZE, os.SEEK_END)
+      file.write(changed_tail)
+
+    _, blocks, announced = self.receive_download(client, [first.content])
+    sent = original[:-p.CHUNK_SIZE] + changed_tail
+    self.assertEqual(b"".join(blocks), sent)
+    self.assertEqual(announced, hashlib.sha256(sent).hexdigest())
 
 
 if __name__ == "__main__":
