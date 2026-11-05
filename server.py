@@ -1,10 +1,12 @@
 import argparse
 import collections
+import errno
 import hashlib
 import os
 import queue
 import select
 import socket
+import stat
 import sys
 import threading
 
@@ -30,6 +32,113 @@ def parse_port(text):
   if not 1024 < port <= 65535:
     raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
   return port
+
+
+class FileRefused(Exception):
+  """Recusa normal de um FILE_REQUEST: `code` é o código estável do ERROR e
+  a mensagem é a explicação legível."""
+
+  def __init__(self, code, message):
+    super().__init__(message)
+    self.code = code
+
+
+def open_shared_file(root, path):
+  """Abre para leitura binária o arquivo `path`, relativo à raiz
+  compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
+  sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
+  ou no arquivo, NOT_FOUND para arquivo inexistente, NOT_REGULAR para
+  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular e
+  ACCESS_ERROR para falta de permissão ou outra falha de acesso, que não se
+  confunde com ausência.
+
+  Cada componente é examinado em ordem, sem seguir links: cada pasta é
+  aberta a partir do descritor da anterior, e o arquivo a partir do
+  descritor da última. Assim um link é recusado antes de se considerar a
+  ausência do que viria depois dele, um objeto não regular nunca é aberto e
+  uma pasta trocada por um link depois de examinada não é seguida, porque o
+  caminho não é resolvido de novo pelo nome. Por fim, o caminho resolvido
+  precisa estar contido na raiz pela relação entre diretórios."""
+  try:
+    p.check_relative_path(path)
+  except p.ForbiddenPath as error:
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+  parts = path.split("/")
+  folder = _open_folder(root, None, "a raiz compartilhada", path)
+  try:
+    for depth, part in enumerate(parts[:-1], start=1):
+      inner = _open_folder(part, folder, "/".join(parts[:depth]), path)
+      os.close(folder)
+      folder = inner
+    try:
+      mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode
+    except OSError as error:
+      raise _refusal_for(error, path) from None
+    if stat.S_ISLNK(mode):
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
+    if not stat.S_ISREG(mode):
+      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+    try:
+      p.check_inside(root, os.path.join(root, *parts))
+    except p.ForbiddenPath as error:
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+    return _open_regular(parts[-1], folder, path)
+  finally:
+    os.close(folder)
+
+
+# Uma pasta é aberta sem seguir links; O_PATH, onde existe, dispensa a
+# permissão de leitura, como o exame por nome.
+_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
+
+
+def _open_folder(name, parent, shown, path):
+  """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
+  completo, sem `parent`), aberta sem seguir links. Uma falha é
+  classificada pelo que está no lugar: link é PATH_FORBIDDEN, algo que não
+  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. `shown` nomeia a
+  pasta na recusa."""
+  try:
+    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+  except OSError as error:
+    failure = error
+  try:
+    mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+  except OSError:
+    raise _refusal_for(failure, path) from None
+  if stat.S_ISLNK(mode):
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
+  if not stat.S_ISDIR(mode):
+    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  raise _refusal_for(failure, path)
+
+
+# Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
+# lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
+# a leitura.
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _open_regular(name, folder, path):
+  try:
+    descriptor = os.open(name, _OPEN_FLAGS, dir_fd=folder)
+  except OSError as error:
+    raise _refusal_for(error, path) from None
+  if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    os.close(descriptor)
+    raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+  return os.fdopen(descriptor, "rb")
+
+
+def _refusal_for(error, path):
+  """Recusa correspondente a uma falha ao examinar ou abrir `path`: só a
+  ausência é NOT_FOUND; falta de permissão e as demais falhas de acesso são
+  ACCESS_ERROR, e um link encontrado ao abrir é PATH_FORBIDDEN."""
+  if isinstance(error, (FileNotFoundError, NotADirectoryError)):
+    return FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  if error.errno == errno.ELOOP:
+    return FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} passa por um link simbólico")
+  return FileRefused(p.ACCESS_ERROR, f"Falha ao acessar o arquivo solicitado: {path} ({error.strerror})")
 
 
 class FileTransfer:
@@ -364,14 +473,9 @@ class Server:
       )
       return
     try:
-      p.check_relative_path(path)
-    except p.ForbiddenPath as error:
-      self._refuse(session, "FILE_REQUEST", p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}")
-      return
-    try:
-      file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
-    except (FileNotFoundError, NotADirectoryError):
-      self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
+      file = open_shared_file(self._shared_root, path)
+    except FileRefused as refusal:
+      self._refuse(session, "FILE_REQUEST", refusal.code, str(refusal))
       return
     session.send_file(file)
 
