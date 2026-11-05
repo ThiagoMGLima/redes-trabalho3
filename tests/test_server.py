@@ -219,9 +219,8 @@ class SessionTest(unittest.TestCase):
 
   def setUp(self):
     self.thread_errors = ThreadErrors(self)
-
-  def tearDown(self):
-    self.assertEqual(self.thread_errors.errors, [])
+    self.expected_thread_errors = []
+    self.addCleanup(lambda: self.assertEqual(self.thread_errors.errors, self.expected_thread_errors))
 
   def open_session(self, small_buffers=False, **options):
     near, peer = tcp_pair(small_buffers)
@@ -232,6 +231,7 @@ class SessionTest(unittest.TestCase):
       "teste",
       send_timeout=options.pop("send_timeout", self.TIMEOUT),
       receive_timeout=options.pop("receive_timeout", self.TIMEOUT),
+      on_message=options.pop("on_message", None),
       on_close=lambda session, reason: closes.append(reason),
     )
     session.start()
@@ -345,6 +345,30 @@ class SessionTest(unittest.TestCase):
       pass
     self.assertNotIn(b"Servidor", received)
     self.assertEqual(closes, ["QUIT"])
+
+  def test_unexpected_failure_handling_a_message_still_runs_the_cleanup(self):
+    failure = RuntimeError("falha inesperada no atendimento")
+    def fail(session, message):
+      raise failure
+    session, peer, closes = self.open_session(on_message=fail)
+
+    peer.sendall(p.encode(p.CHAT, {"text": "oi"}))
+
+    self.assertFinished(session)
+    self.assertEqual(len(closes), 1)
+    self.assertPeerSeesEnd(peer)
+    self.expected_thread_errors.append(failure)
+
+  def test_unexpected_failure_writing_a_message_still_runs_the_cleanup(self):
+    session, peer, closes = self.open_session()
+
+    session.send(p.CHAT, {"text": object()})
+
+    self.assertFinished(session)
+    self.assertEqual(len(closes), 1)
+    self.assertPeerSeesEnd(peer)
+    self.assertEqual([type(error) for error in self.thread_errors.errors], [TypeError])
+    self.expected_thread_errors = self.thread_errors.errors
 
   def test_messages_sent_after_close_are_ignored(self):
     session, peer, closes = self.open_session()

@@ -89,9 +89,11 @@ class Session:
         return
 
   def _read_loop(self):
+    reason = "falha inesperada no atendimento"
     try:
-      self.close(self._receive_until_end())
+      reason = self._receive_until_end()
     finally:
+      self.close(reason)
       self._writer.join()
       self.sock.close()
 
@@ -115,18 +117,23 @@ class Session:
         self._on_message(self, message)
 
   def _write_loop(self):
+    reason = "falha inesperada no envio"
+    try:
+      reason = self._send_until_stopped()
+    finally:
+      self.close(reason)
+
+  def _send_until_stopped(self):
     while True:
       item = self._outgoing.get()
       if item is self._STOP:
-        return
+        return "sessão encerrada"
       try:
         p.send_message(self.sock, *item, timeout=self._send_timeout)
       except p.FrameTimeout:
-        self.close("prazo de envio expirado")
-        return
+        return "prazo de envio expirado"
       except OSError as error:
-        self.close(f"falha no envio: {error}")
-        return
+        return f"falha no envio: {error}"
 
 
 class Server:
