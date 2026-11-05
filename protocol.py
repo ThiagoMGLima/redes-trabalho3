@@ -41,6 +41,7 @@ RECEIVE_TIMEOUT = 10.0
 MAX_CHAT_BYTES = 1024
 
 INVALID_CHAT = "INVALID_CHAT"
+INVALID_REQUEST = "INVALID_REQUEST"
 
 Message = namedtuple("Message", "type content")
 

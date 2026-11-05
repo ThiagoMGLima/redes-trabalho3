@@ -223,13 +223,20 @@ class Server:
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
 
   def _receive_chat(self, session, content):
-    text = content["text"]
+    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(text, str):
+      self._refuse(session, "CHAT", p.INVALID_REQUEST, "CHAT exige um objeto com o campo text em texto")
+      return
     try:
       p.check_chat_text(text)
     except p.InvalidChatText as error:
-      session.send(p.ERROR, {"operation": "CHAT", "code": p.INVALID_CHAT, "message": str(error)})
+      self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
       return
     self._forward_chat(session, text)
+
+  def _refuse(self, session, operation, code, message):
+    """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""
+    session.send(p.ERROR, {"operation": operation, "code": code, "message": message})
 
   def _forward_chat(self, sender, text):
     """Exibe no terminal e encaminha aos demais clientes, com a origem

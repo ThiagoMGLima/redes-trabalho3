@@ -299,6 +299,10 @@ class ChatTest(ServerTestCase):
     ]
     self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], "INVALID_CHAT")
 
+  def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
+    contents = [{}, {"mensagem": "oi"}, {"text": None}, {"text": 42}, {"text": ["oi"]}, ["oi"], "oi", 7, None]
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], "INVALID_REQUEST")
+
   def test_text_that_cannot_be_encoded_as_utf8_gets_invalid_chat(self):
     payload = b'{"text": "\\ud800"}'
     self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
