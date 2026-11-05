@@ -8,6 +8,8 @@ import protocol as p
 from server import Server
 from tests.support import LogRecorder, receive_within
 
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 
 class ServerDownloadTest(unittest.TestCase):
   """Pedidos de arquivo a um servidor real, cuja raiz compartilhada é um
@@ -77,6 +79,14 @@ class ServerDownloadTest(unittest.TestCase):
     self.assertEqual([len(block) for block in blocks], [8192, 8192, 3616])
     self.assertEqual(b"".join(blocks), content)
     self.assertEqual(announced, sha256)
+
+  def test_empty_file_is_sent_as_meta_with_size_zero_and_end_with_the_empty_hash(self):
+    self.share("vazio.txt", b"")
+    client = self.connect()
+
+    self.request(client, "vazio.txt")
+
+    self.assertEqual(self.receive_download(client), (0, [], EMPTY_SHA256))
 
 
 if __name__ == "__main__":
