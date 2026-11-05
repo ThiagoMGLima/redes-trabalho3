@@ -230,6 +230,34 @@ class RelayedDownloadTest(unittest.TestCase):
     self.assertEqual(receive_within(other).type, p.FILE_END)
     self.assertEqual(len(self.log.matching("Desconectado:")), 1)
 
+  def download_small(self, path, content):
+    """Baixa por inteiro um arquivo pequeno, liberando exatamente seus frames."""
+    sha256 = share(self.shared_root, path, content)
+    self.relay.allow(sum(len(frame) for frame in (
+      p.encode(p.FILE_META, {"size": len(content)}), p.encode(p.FILE_DATA, content),
+      p.encode(p.FILE_END, {"sha256": sha256}),
+    )))
+    self.type_line("2")
+    self.type_line(path)
+    self.output.wait_for(CONCLUDED)
+
+  def test_send_deadline_expiring_during_a_transfer_disconnects_and_the_client_discards_only_that_download(self):
+    self.start(send_timeout=0.5)
+    self.download_small("pronto.txt", b"pronto")
+    shared = self.start_big_download("grande.bin")
+
+    self.assertIn("prazo de envio", self.log.wait_for(f"Desconectado: {self.client_name}"))
+    self.assertTrue(wait_until(lambda: not is_open_here(shared)), "o servidor não liberou o arquivo")
+    self.relay.allow()
+
+    self.output.wait_for("Desconectado do servidor")
+    self.assertIn("Download de grande.bin interrompido", self.output.text)
+    self.assertEqual(self.output.text.count(CONCLUDED), 1)
+    self.assertEqual(files_under(self.downloads_root), ["pronto.txt"])
+    self.client.stdin.close()
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn("Traceback", self.output.text)
+
 
 class ScriptedServerInterruptionTest(unittest.TestCase):
   """O cliente roda como no terminal, a partir de uma cópia do programa, e o
