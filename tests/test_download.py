@@ -8,7 +8,7 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.support import LogRecorder, OutputReader, free_port, install_programs, receive_within, wait_until
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 SIZE_12_MIB = 12_582_912
@@ -392,6 +392,48 @@ class ScriptedServerDownloadTest(unittest.TestCase):
     self.serve(3, [b"abc"], abc)
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
+
+
+
+class WorkingDirectoryTest(unittest.TestCase):
+  """Servidor e cliente rodam como no terminal, cada um a partir de uma
+  cópia do programa em sua própria pasta, iniciados de um terceiro diretório
+  corrente que também tem files/ e downloads/."""
+
+  def start(self, script, *args, cwd):
+    process = subprocess.Popen(
+      [sys.executable, "-u", script, *args],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    output = OutputReader(process.stdout)
+    self.addCleanup(output.close)
+    self.addCleanup(process.wait, 5)
+    self.addCleanup(process.kill)
+    self.addCleanup(process.stdin.close)
+    return process, output
+
+  def test_shared_and_download_roots_sit_next_to_the_programs_whatever_the_working_directory(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    server_program = install_programs(os.path.join(base.name, "servidor"))
+    client_program = install_programs(os.path.join(base.name, "cliente"))
+    working_dir = os.path.join(base.name, "corrente")
+    share(os.path.join(server_program, "files"), "aulas/resumo.pdf", b"da raiz do servidor")
+    share(os.path.join(working_dir, "files"), "aulas/resumo.pdf", b"do diretorio corrente")
+    os.makedirs(os.path.join(working_dir, "downloads"))
+    port = str(free_port())
+
+    _, server_output = self.start(os.path.join(server_program, "server.py"), port, cwd=working_dir)
+    server_output.wait_for(port)
+    client, client_output = self.start(os.path.join(client_program, "client.py"), "127.0.0.1", port, cwd=working_dir)
+    client.stdin.write("2\naulas/resumo.pdf\n")
+    client.stdin.flush()
+
+    client_output.wait_for(CONCLUDED)
+    with open(os.path.join(client_program, "downloads", "aulas", "resumo.pdf"), "rb") as file:
+      self.assertEqual(file.read(), b"da raiz do servidor")
+    self.assertEqual(files_under(os.path.join(working_dir, "downloads")), [])
 
 
 if __name__ == "__main__":
