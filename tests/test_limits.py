@@ -52,6 +52,68 @@ class ClientLimitTest(ServerTestCase):
     self.assertEqual(log.matching(f"Recusado: {address_of(newcomer)}"), [])
 
 
+@unittest.skipUnless(hasattr(socket, "TCP_MAXSEG"), "requer TCP_MAXSEG para limitar o buffer de envio do servidor")
+class SlowRecipientTest(ServerTestCase):
+  """Um destinatário que não lê o socket não segura o chat dos demais."""
+
+  TEXT = "x" * 1000
+  MAX_MESSAGES = 5000
+
+  def connect_slow_reader(self, server, log):
+    """Cliente que nunca lê. Buffer de recepção e segmentos pequenos fazem o
+    envio do servidor para ele travar após poucas mensagens."""
+    sock = socket.socket()
+    self.addCleanup(sock.close)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 536)
+    sock.settimeout(5)
+    sock.connect(server.address)
+    log.wait_for(f"Conectado: {address_of(sock)}")
+    return sock
+
+  def chat_until_disconnected(self, slow, sender, other, log, pause=0.0):
+    """Envia chats um a um até o servidor desconectar `slow`; o outro
+    destinatário precisa receber cada um antes do próximo envio. Devolve o
+    maior tempo de entrega observado no outro destinatário."""
+    slowest = 0.0
+    for number in range(self.MAX_MESSAGES):
+      text = f"{number} {self.TEXT}"
+      start = time.monotonic()
+      sender.sendall(p.encode(p.CHAT, {"text": text}))
+      self.assertEqual(receive_within(other).content["text"], text)
+      slowest = max(slowest, time.monotonic() - start)
+      if log.matching(f"Desconectado: {address_of(slow)}"):
+        return slowest
+      time.sleep(pause)
+    self.fail(f"o destinatário que não lê continuou conectado após {self.MAX_MESSAGES} mensagens")
+
+  def assertSeesTheEnd(self, sock):
+    try:
+      while sock.recv(65536):
+        pass
+    except ConnectionResetError:
+      pass
+
+  def assertTheOthersKeepChatting(self, sender, other, log):
+    sender.sendall(p.encode(p.CHAT, {"text": "ainda conversando"}))
+    self.assertEqual(receive_within(other).content["text"], "ainda conversando")
+    other.sendall(p.encode(p.CHAT, {"text": "também"}))
+    self.assertEqual(receive_within(sender).content["text"], "também")
+    self.assertEqual(len(log.matching("Desconectado:")), 1)
+
+  def test_full_queue_disconnects_only_the_recipient_that_does_not_read(self):
+    server, log = self.start_server(send_timeout=60)
+    slow = self.connect_slow_reader(server, log)
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+
+    self.chat_until_disconnected(slow, sender, other, log)
+
+    self.assertIn("fila", log.wait_for(f"Desconectado: {address_of(slow)}"))
+    self.assertSeesTheEnd(slow)
+    self.assertTheOthersKeepChatting(sender, other, log)
+
+
 class OutgoingQueueTest(unittest.TestCase):
   """Fila de saída de uma sessão sobre uma conexão TCP local; `peer` é o
   destinatário, que não lê."""
