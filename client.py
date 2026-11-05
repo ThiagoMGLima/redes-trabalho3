@@ -55,10 +55,12 @@ class Download:
   def __init__(self, path, destination):
     self.path = path
     self.destination = destination
+    self.started = False
     self._temp = None
     self._temp_path = None
 
   def start(self, size):
+    self.started = True
     folder = os.path.dirname(self.destination)
     os.makedirs(folder, exist_ok=True)
     descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
@@ -169,6 +171,14 @@ class Client:
     texto parcialmente digitado na linha atual."""
     show("\n" + line)
 
+  def _receive_error(self, error):
+    """Recusa normal do servidor: a sessão continua. Uma recusa de
+    FILE_REQUEST encerra o download que ainda aguardava FILE_META."""
+    download = self._download
+    if error.get("operation") == "FILE_REQUEST" and download is not None and not download.started:
+      self._download = None
+    self._show_received(f"Erro do servidor em {error.get('operation')}: {error.get('message')} ({error.get('code')})")
+
   def _receive_download(self, message):
     download = self._download
     if download is None:
@@ -192,6 +202,8 @@ class Client:
         break
       if message.type == p.CHAT and isinstance(message.content, dict):
         self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
+      elif message.type == p.ERROR and isinstance(message.content, dict):
+        self._receive_error(message.content)
       elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
         self._receive_download(message)
     self._disconnected.set()

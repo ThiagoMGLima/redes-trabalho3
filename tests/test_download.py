@@ -219,6 +219,17 @@ class ClientDownloadTest(unittest.TestCase):
     self.assertEqual(os.path.getsize(self.downloaded("grande.bin")), SIZE_12_MIB)
     self.assertEqual(sha256_of(self.downloaded("grande.bin")), sha256)
 
+  def test_missing_file_shows_the_not_found_error_and_the_session_keeps_accepting_operations(self):
+    share(self.shared_root, "presente.txt", b"presente")
+
+    self.type_line("2")
+    self.type_line("ausente.txt")
+
+    self.output.wait_for("Arquivo inexistente: ausente.txt (NOT_FOUND)")
+    self.download("presente.txt")
+    self.assertEqual(os.listdir(self.downloads_root), ["presente.txt"])
+    self.assertEqual(self.log.matching("Desconectado:"), [])
+
 
 if __name__ == "__main__":
   unittest.main()
