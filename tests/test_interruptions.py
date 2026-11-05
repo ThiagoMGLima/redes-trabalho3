@@ -327,10 +327,11 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.assertEqual(self.client.wait(5), 0)
     self.assertNotIn("Traceback", self.output.text)
 
-  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection):
+  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0):
     """Um download é concluído e outro está em andamento quando a conexão
-    termina: a desconexão aparece sem que se pressione Enter, o temporário
-    some, nada mais é anunciado como concluído e o primeiro permanece."""
+    termina: a desconexão aparece em até `timeout` segundos sem que se
+    pressione Enter, o temporário some, nada mais é anunciado como concluído
+    e o primeiro permanece."""
     self.request("pronto.txt")
     self.send(p.FILE_META, {"size": 6})
     self.send(p.FILE_DATA, b"pronto")
@@ -340,7 +341,7 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
 
     end_connection()
 
-    self.output.wait_for("Desconectado do servidor")
+    self.output.wait_for("Desconectado do servidor", timeout)
     self.assertIn("Download de aulas/grande.bin interrompido", self.output.text)
     self.assertEqual(self.output.text.count(CONCLUDED), 1)
     self.assertEqual(files_under(self.downloads_root), ["pronto.txt"])
@@ -362,6 +363,12 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
       self.server_side.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
       self.server_side.close()
     self.assertDisconnectionDiscardsOnlyTheActiveDownload(reset)
+
+  def test_receive_deadline_expiring_in_the_middle_of_a_block(self):
+    """Um bloco começa a chegar e para, sem que a conexão termine: o prazo
+    de recepção do cliente expira e a sessão acaba como numa desconexão."""
+    stall = lambda: self.server_side.sendall(p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE))[:100])
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(stall, timeout=p.RECEIVE_TIMEOUT + 5)
 
   @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
   def test_failure_to_remove_the_temporary_after_a_disconnection_is_reported(self):
