@@ -12,8 +12,6 @@ from tests.support import LogRecorder, OutputReader, free_port, install_programs
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 SIZE_12_MIB = 12_582_912
-PROMPT = "Escolha uma opção"
-FILE_PROMPT = "Caminho do arquivo"
 CONCLUDED = "Download concluído"
 
 
