@@ -229,5 +229,84 @@ class RelayedDownloadTest(unittest.TestCase):
     self.assertEqual(len(self.log.matching("Desconectado:")), 1)
 
 
+class ScriptedServerInterruptionTest(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
+  teste faz o papel do servidor na conexão TCP local, decidindo o que é
+  enviado e quando a conexão termina."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    program = install_programs(os.path.join(base.name, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    self.addCleanup(listener.close)
+    listener.settimeout(5)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+    self.server_side, _ = listener.accept()
+    self.addCleanup(self.server_side.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def downloaded(self, path):
+    return os.path.join(self.downloads_root, *path.split("/"))
+
+  def request(self, path):
+    self.type_line("2")
+    self.type_line(path)
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+
+  def send(self, msg_type, content):
+    self.server_side.sendall(p.encode(msg_type, content))
+
+  def start_transfer(self, path, size=3 * p.CHUNK_SIZE):
+    """Pede `path`, envia FILE_META e um bloco e espera o bloco chegar ao
+    temporário; devolve o caminho do temporário."""
+    self.request(path)
+    self.send(p.FILE_META, {"size": size})
+    self.send(p.FILE_DATA, bytes(p.CHUNK_SIZE))
+    written = lambda: [
+      name for name in files_under(self.downloads_root)
+      if os.path.getsize(self.downloaded(name)) == p.CHUNK_SIZE
+    ]
+    self.assertTrue(wait_until(written), files_under(self.downloads_root))
+    return self.downloaded(written()[0])
+
+  def forbid_removals_in(self, folder):
+    os.chmod(folder, 0o555)
+    self.addCleanup(os.chmod, folder, 0o755)
+
+  def assertExitsAfterEnter(self):
+    self.client.stdin.close()
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn("Traceback", self.output.text)
+
+  @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
+  def test_failure_to_remove_the_temporary_after_a_disconnection_is_reported(self):
+    temporary = self.start_transfer("aulas/grande.bin")
+    self.forbid_removals_in(os.path.dirname(temporary))
+
+    self.server_side.close()
+
+    self.output.wait_for("Desconectado do servidor")
+    self.assertIn(f"Não foi possível remover o arquivo temporário {temporary}", self.output.text)
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertFalse(os.path.lexists(self.downloaded("aulas/grande.bin")))
+    self.assertExitsAfterEnter()
+
+
 if __name__ == "__main__":
   unittest.main()

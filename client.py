@@ -51,6 +51,11 @@ class DownloadFailed(Exception):
   """Download não publicado; a mensagem traz o motivo."""
 
 
+class TemporaryNotRemoved(Exception):
+  """O temporário de um download não pôde ser removido; a mensagem traz o
+  caminho e o motivo."""
+
+
 class Download:
   """Download ativo, do pedido até a publicação. A receptora grava cada bloco
   recebido em um temporário na pasta do destino e calcula o SHA-256 nos
@@ -99,11 +104,17 @@ class Download:
 
   def discard(self):
     """Fecha e remove o temporário de um download que não terminou; sem
-    temporário, não faz nada."""
+    temporário, não faz nada. Levanta TemporaryNotRemoved se a remoção
+    falhar."""
     if self._temp is None:
       return
     self._temp.close()
-    os.unlink(self._temp_path)
+    try:
+      os.unlink(self._temp_path)
+    except OSError as error:
+      raise TemporaryNotRemoved(
+        f"Não foi possível remover o arquivo temporário {self._temp_path}: {error.strerror}"
+      ) from None
 
 
 class Client:
@@ -237,14 +248,19 @@ class Client:
 
   def _interrupt_download(self):
     """Fim da sessão com download ativo, por Sair ou desconexão: o
-    temporário é descartado e nada é publicado. Não há retomada."""
+    temporário é descartado e nada é publicado; uma falha ao removê-lo é
+    informada. Não há retomada."""
     download, self._download = self._download, None
     if download is None:
       return
-    download.discard()
-    self._show_received(
+    report = [
       f"Download de {download.path} interrompido: nada foi publicado. Solicite-o novamente para baixá-lo desde o início."
-    )
+    ]
+    try:
+      download.discard()
+    except TemporaryNotRemoved as error:
+      report.append(str(error))
+    self._show_received("\n".join(report))
 
   def _receive_loop(self):
     while True:
