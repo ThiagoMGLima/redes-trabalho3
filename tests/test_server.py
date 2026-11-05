@@ -106,9 +106,10 @@ class CtrlCTest(unittest.TestCase):
       [sys.executable, "-u", SERVER_SCRIPT, str(port)],
       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    output = OutputReader(process.stdout)
+    self.addCleanup(output.close)
     self.addCleanup(process.wait, 5)
     self.addCleanup(process.kill)
-    output = OutputReader(process.stdout)
     output.wait_for(str(port))
     client = socket.create_connection(("127.0.0.1", port), timeout=5)
     self.addCleanup(client.close)

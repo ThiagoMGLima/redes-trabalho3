@@ -87,6 +87,10 @@ class OutputReader:
     with self._lock:
       return self._text
 
+  def close(self):
+    self._thread.join(5)
+    self._stream.close()
+
   def wait_for(self, text, timeout=5.0):
     if not wait_until(lambda: text in self.text, timeout):
       raise AssertionError(f"{text!r} não apareceu na saída: {self.text!r}")

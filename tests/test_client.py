@@ -22,10 +22,11 @@ class ClientSessionTest(unittest.TestCase):
       [sys.executable, "-u", CLIENT_SCRIPT, "127.0.0.1", str(self.server.address[1])],
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
     self.addCleanup(self.client.wait, 5)
     self.addCleanup(self.client.kill)
     self.addCleanup(self.client.stdin.close)
-    self.output = OutputReader(self.client.stdout)
 
   def type_line(self, line):
     self.client.stdin.write(line + "\n")
