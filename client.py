@@ -50,17 +50,22 @@ def parse_port(text):
 def check_destination(root, path):
   """Destino local de `path`, um caminho já aceito por
   p.check_relative_path, sob a raiz de downloads `root`. Levanta
-  p.ForbiddenPath se uma pasta existente do caminho for link simbólico;
-  pastas que ainda não existem são aceitas."""
+  p.ForbiddenPath se a raiz, uma pasta existente do caminho ou o próprio
+  destino for link simbólico; pastas que ainda não existem são aceitas."""
   parts = path.split("/")
   existing_folders(root, parts[:-1])
-  return os.path.join(root, *parts)
+  destination = os.path.join(root, *parts)
+  if os.path.islink(destination):
+    raise p.ForbiddenPath(f"{path} é um link simbólico")
+  return destination
 
 
 def existing_folders(root, names):
-  """Percorre, sem seguir links, as pastas `names` sob `root` e devolve a
-  última, ou None se alguma ainda não existir. Levanta p.ForbiddenPath para
-  link simbólico."""
+  """Percorre, sem seguir links, a raiz `root` e as pastas `names` sob ela e
+  devolve a última, ou None se alguma ainda não existir. Levanta
+  p.ForbiddenPath para link simbólico."""
+  if os.path.islink(root):
+    raise p.ForbiddenPath("a raiz de downloads é um link simbólico")
   folder = root
   for depth, name in enumerate(names, start=1):
     folder = os.path.join(folder, name)

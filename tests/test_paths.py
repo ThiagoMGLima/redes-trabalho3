@@ -286,6 +286,34 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertRefusedLocally(paths, FORBIDDEN)
     self.assertEqual(files_under(self.outside) + files_under(self.sibling), [])
 
+  def test_downloads_root_that_is_a_symbolic_link_is_refused_locally(self):
+    """Mesmo apontando para uma pasta real, a raiz que é um link recusa todo
+    pedido sem enviá-lo; o chat continua disponível."""
+    os.rename(self.downloads_root, os.path.join(self.base, "real"))
+    os.symlink(os.path.join(self.base, "real"), self.downloads_root)
+
+    for path in ["resumo.pdf", "aulas/resumo.pdf"]:
+      self.type_line("2")
+      self.type_line(path)
+    self.type_line("3")
+    self.type_line("depois das recusas")
+
+    self.assertEqual(receive_within(self.server_side), (p.CHAT, {"text": "depois das recusas"}))
+    self.assertEqual(self.output.text.count(FORBIDDEN), 2)
+    self.assertEqual(files_under(os.path.join(self.base, "real")), [])
+
+  def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
+    with open(self.local("meu.txt"), "wb") as file:
+      file.write(b"meu")
+    self.link("interno.txt", "meu.txt")
+    self.link("quebrado.txt", "nao-existe.txt")
+    self.link("externo.txt", os.path.join(self.outside, "novo.txt"))
+
+    self.assertRefusedLocally(["interno.txt", "quebrado.txt", "externo.txt"], FORBIDDEN)
+    self.assertEqual(os.readlink(self.local("interno.txt")), "meu.txt")
+    self.assertEqual(os.readlink(self.local("quebrado.txt")), "nao-existe.txt")
+    self.assertEqual(files_under(self.outside), [])
+
 
 if __name__ == "__main__":
   unittest.main()
