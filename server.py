@@ -1,5 +1,6 @@
 import argparse
 import collections
+import errno
 import hashlib
 import os
 import queue
@@ -46,8 +47,10 @@ def open_shared_file(root, path):
   """Abre para leitura binária o arquivo `path`, relativo à raiz
   compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
   sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
-  ou no arquivo, NOT_FOUND para arquivo inexistente e NOT_REGULAR para
-  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular.
+  ou no arquivo, NOT_FOUND para arquivo inexistente, NOT_REGULAR para
+  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular e
+  ACCESS_ERROR para falta de permissão ou outra falha de acesso, que não se
+  confunde com ausência.
 
   Cada componente é examinado em ordem, sem seguir links, antes de abrir o
   arquivo; assim um link é recusado antes de se considerar a ausência do que
@@ -64,8 +67,8 @@ def open_shared_file(root, path):
     target = os.path.join(target, part)
     try:
       mode = os.lstat(target).st_mode
-    except FileNotFoundError:
-      raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
+    except OSError as error:
+      raise _refusal_for(error, path) from None
     if stat.S_ISLNK(mode):
       link = "/".join(parts[:depth])
       raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {link} é um link simbólico")
@@ -85,12 +88,23 @@ _OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLO
 def _open_regular(target, path):
   try:
     descriptor = os.open(target, _OPEN_FLAGS)
-  except FileNotFoundError:
-    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}") from None
+  except OSError as error:
+    raise _refusal_for(error, path) from None
   if not stat.S_ISREG(os.fstat(descriptor).st_mode):
     os.close(descriptor)
     raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
   return os.fdopen(descriptor, "rb")
+
+
+def _refusal_for(error, path):
+  """Recusa correspondente a uma falha ao examinar ou abrir `path`: só a
+  ausência é NOT_FOUND; falta de permissão e as demais falhas de acesso são
+  ACCESS_ERROR, e um link encontrado ao abrir é PATH_FORBIDDEN."""
+  if isinstance(error, (FileNotFoundError, NotADirectoryError)):
+    return FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  if error.errno == errno.ELOOP:
+    return FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} passa por um link simbólico")
+  return FileRefused(p.ACCESS_ERROR, f"Falha ao acessar o arquivo solicitado: {path} ({error.strerror})")
 
 
 class FileTransfer:

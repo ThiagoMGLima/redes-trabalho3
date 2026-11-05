@@ -117,6 +117,23 @@ class SharedRootTest(unittest.TestCase):
     paths = ["aulas", "vazia", "canal", "aulas/canal", "tomada"]
     self.assertRefusedKeepingTheSession(paths, p.NOT_REGULAR)
 
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_missing_permission_gets_access_error_not_not_found(self):
+    """Sem permissão para ler o arquivo ou para atravessar a pasta, o pedido
+    recebe ACCESS_ERROR, mesmo que o arquivo atrás da pasta não exista; uma
+    proibição de sintaxe continua sendo PATH_FORBIDDEN."""
+    share(self.shared_root, "presente.txt", b"presente")
+    share(self.shared_root, "fechado.txt", b"sem leitura")
+    share(self.shared_root, "trancada/dentro.txt", b"atras da pasta")
+    os.chmod(self.shared("fechado.txt"), 0)
+    os.chmod(self.shared("trancada"), 0)
+    self.addCleanup(os.chmod, self.shared("trancada"), 0o700)
+    self.start_server()
+
+    paths = ["fechado.txt", "trancada/dentro.txt", "trancada/ausente.txt"]
+    self.assertRefusedKeepingTheSession(paths, p.ACCESS_ERROR)
+    self.assertRefusedKeepingTheSession(["trancada/../presente.txt"], p.PATH_FORBIDDEN)
+
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""
