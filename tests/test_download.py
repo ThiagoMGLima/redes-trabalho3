@@ -17,9 +17,11 @@ class ServerDownloadTest(unittest.TestCase):
   diretório temporário."""
 
   def setUp(self):
-    shared = tempfile.TemporaryDirectory()
-    self.addCleanup(shared.cleanup)
-    self.shared_root = shared.name
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.outside_root = base.name
+    self.shared_root = os.path.join(base.name, "files")
+    os.mkdir(self.shared_root)
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
@@ -89,6 +91,18 @@ class ServerDownloadTest(unittest.TestCase):
     contents = [{}, {"caminho": "presente.txt"}, {"path": None}, {"path": 7}, {"path": ["presente.txt"]},
                 ["presente.txt"], "presente.txt", None]
     self.assertRefusedKeepingTheSession(contents, "INVALID_REQUEST")
+
+  def test_forbidden_path_syntax_gets_path_forbidden_even_when_the_target_exists(self):
+    with open(os.path.join(self.outside_root, "fora.txt"), "wb") as file:
+      file.write(b"fora da raiz")
+    self.share("aulas/resumo.pdf", b"resumo")
+    forbidden = [
+      "", "../fora.txt", "../../ausente.txt", "aulas/../aulas/resumo.pdf", "./aulas/resumo.pdf",
+      "aulas/./resumo.pdf", "aulas//resumo.pdf", "aulas/", "/etc/passwd",
+      os.path.join(self.outside_root, "fora.txt"), "C:/dados/a.txt", "C:\\dados\\a.txt", "aulas\\resumo.pdf",
+      "aulas/resumo.pdf\x00", "nome\nquebrado", "tab\tulado", "escape\x1b",
+    ]
+    self.assertRefusedKeepingTheSession([{"path": path} for path in forbidden], "PATH_FORBIDDEN")
 
   def test_file_is_sent_as_meta_8_kib_blocks_and_end_with_its_sha256(self):
     content = os.urandom(2 * 8192 + 3616)

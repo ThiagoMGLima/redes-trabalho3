@@ -289,6 +289,11 @@ class Server:
       self._refuse(session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string")
       return
     try:
+      p.check_relative_path(path)
+    except p.ForbiddenPath as error:
+      self._refuse(session, "FILE_REQUEST", p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}")
+      return
+    try:
       file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
     except FileNotFoundError:
       self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
