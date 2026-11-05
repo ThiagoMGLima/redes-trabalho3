@@ -347,6 +347,18 @@ class DownloadsRootTest(unittest.TestCase):
     with open(self.local("permitido.txt"), "rb") as file:
       self.assertEqual(file.read(), b"permitido")
 
+  def test_examples_forbidden_by_the_path_policy_are_refused_locally_without_sending_the_request(self):
+    """Os exemplos proibidos da resolução da #3 que podem ser digitados numa
+    linha, mesmo os que apontariam para algo existente na raiz de
+    downloads, recebem a recusa local e nada é criado."""
+    os.mkdir(self.local("aulas"))
+    forbidden = ["../../segredo.txt", "aulas/../resumo.pdf", "/etc/passwd", "C:/dados/a.txt", "C:\\dados\\a.txt",
+                 "", "./arquivo", "aulas//resumo.pdf", "aulas/", "arquivo\x00", "arq\u2028uivo"]
+
+    self.assertRefusedLocally(forbidden, FORBIDDEN)
+    self.assertEqual(files_under(self.downloads_root), ["permitido.txt"])
+    self.assertEqual(os.listdir(self.local("aulas")), [])
+
   def test_symbolic_link_as_a_download_folder_is_refused_locally_without_sending_the_request(self):
     os.mkdir(self.local("aulas"))
     self.link("interna", "aulas")
