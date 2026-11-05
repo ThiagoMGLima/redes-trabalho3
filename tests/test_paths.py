@@ -302,6 +302,23 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(self.output.text.count(FORBIDDEN), 2)
     self.assertEqual(files_under(os.path.join(self.base, "real")), [])
 
+  def test_link_that_appears_in_a_download_folder_after_the_request_fails_the_download_writing_nothing(self):
+    """As pastas são verificadas de novo ao criar as que faltam: um link que
+    surge depois do pedido não leva o conteúdo para fora da raiz."""
+    self.request("aulas/2024/resumo.pdf")
+    self.link("aulas", self.outside)
+
+    self.serve(b"conteudo")
+
+    self.output.wait_for("Download de aulas/2024/resumo.pdf falhou")
+    self.assertEqual(files_under(self.outside), [])
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.request("outro.txt")
+    self.serve(b"outro")
+    self.output.wait_for(CONCLUDED)
+    self.assertEqual(files_under(self.downloads_root), ["outro.txt"])
+    self.assertEqual(os.readlink(self.local("aulas")), self.outside)
+
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
     with open(self.local("meu.txt"), "wb") as file:
       file.write(b"meu")

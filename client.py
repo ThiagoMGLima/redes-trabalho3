@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import os
 import socket
+import stat
 import sys
 import tempfile
 import threading
@@ -53,26 +54,37 @@ def check_destination(root, path):
   p.ForbiddenPath se a raiz, uma pasta existente do caminho ou o próprio
   destino for link simbólico; pastas que ainda não existem são aceitas."""
   parts = path.split("/")
-  existing_folders(root, parts[:-1])
+  download_folder(root, parts[:-1])
   destination = os.path.join(root, *parts)
   if os.path.islink(destination):
     raise p.ForbiddenPath(f"{path} é um link simbólico")
   return destination
 
 
-def existing_folders(root, names):
-  """Percorre, sem seguir links, a raiz `root` e as pastas `names` sob ela e
-  devolve a última, ou None se alguma ainda não existir. Levanta
-  p.ForbiddenPath para link simbólico."""
-  if os.path.islink(root):
-    raise p.ForbiddenPath("a raiz de downloads é um link simbólico")
+def download_folder(root, names, create=False):
+  """Percorre, sem seguir links, a raiz de downloads `root` e as pastas
+  `names` sob ela, nessa ordem, e devolve a última. Uma pasta que falta é
+  criada quando `create` é verdadeiro; senão, devolve None. Cada pasta,
+  existente ou recém-criada, é examinada antes de passar à seguinte, e a
+  última precisa estar contida na raiz. Levanta p.ForbiddenPath para link
+  simbólico ou saída da raiz."""
   folder = root
-  for depth, name in enumerate(names, start=1):
-    folder = os.path.join(folder, name)
-    if not os.path.lexists(folder):
+  for depth in range(len(names) + 1):
+    if depth:
+      folder = os.path.join(folder, names[depth - 1])
+    if create:
+      try:
+        os.mkdir(folder)
+      except FileExistsError:
+        pass
+    try:
+      mode = os.lstat(folder).st_mode
+    except FileNotFoundError:
       return None
-    if os.path.islink(folder):
-      raise p.ForbiddenPath(f"{'/'.join(names[:depth])} é um link simbólico")
+    if stat.S_ISLNK(mode):
+      where = "/".join(names[:depth]) if depth else "a raiz de downloads"
+      raise p.ForbiddenPath(f"{where} é um link simbólico")
+  p.check_inside(root, folder)
   return folder
 
 
@@ -85,10 +97,12 @@ class Download:
   recebido em um temporário na pasta do destino e calcula o SHA-256 nos
   blocos; o destino final só recebe o arquivo verificado."""
 
-  def __init__(self, path, destination):
+  def __init__(self, path, destination, downloads_root):
     self.path = path
     self.destination = destination
     self.started = False
+    self._downloads_root = downloads_root
+    self._failure = None
     self._size = None
     self._received = 0
     self._digest = hashlib.sha256()
@@ -96,14 +110,22 @@ class Download:
     self._temp_path = None
 
   def start(self, size):
+    """Cria as pastas que faltam sob a raiz de downloads e o temporário. Se
+    o caminho tiver deixado de ser permitido desde o pedido, nada é gravado
+    e o download falha ao receber FILE_END."""
     self.started = True
     self._size = size
-    folder = os.path.dirname(self.destination)
-    os.makedirs(folder, exist_ok=True)
+    try:
+      folder = download_folder(self._downloads_root, self.path.split("/")[:-1], create=True)
+    except p.ForbiddenPath as error:
+      self._failure = f"caminho inválido ou proibido: {error}"
+      return
     descriptor, self._temp_path = tempfile.mkstemp(prefix=".", suffix=".parcial", dir=folder)
     self._temp = os.fdopen(descriptor, "wb")
 
   def write(self, block):
+    if self._failure is not None:
+      return
     self._temp.write(block)
     self._temp.flush()
     self._digest.update(block)
@@ -113,6 +135,8 @@ class Download:
     """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
     FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
     Levanta DownloadFailed com o motivo; o temporário é sempre removido."""
+    if self._failure is not None:
+      raise DownloadFailed(self._failure)
     try:
       self._temp.close()
       if self._received != self._size:
@@ -207,7 +231,7 @@ class Client:
     if os.path.lexists(destination):
       show(f"Download recusado: já existe algo em {destination}; o objeto existente foi preservado.")
       return
-    self._download = Download(path, destination)
+    self._download = Download(path, destination, self._downloads_root)
     try:
       p.send_message(self._sock, p.FILE_REQUEST, {"path": path})
     except (p.ProtocolError, OSError) as error:
