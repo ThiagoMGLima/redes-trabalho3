@@ -256,6 +256,18 @@ class ChatTest(ServerTestCase):
     log.wait_for("[Cliente 1] sou o servidor")
     self.assertEqual(log.matching("[Servidor]"), [])
 
+  def test_text_from_1_to_1024_utf8_bytes_is_forwarded_unchanged(self):
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+    accepted = ["a", "😀" * 256, "é" * 512, "  ação  com   espaços 👍🏽 ", "👨‍👩‍👧 família"]
+
+    for text in accepted:
+      self.chat(sender, {"text": text})
+
+    self.assertEqual([receive_within(other).content["text"] for _ in accepted], accepted)
+    self.assertStillOpen(sender)
+
   def assertRefusedKeepingTheSession(self, frames, code):
     """Cada frame recebe ERROR com `code`; nada é encaminhado e a sessão
     continua: a próxima mensagem válida é a primeira que o outro recebe."""
