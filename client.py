@@ -380,7 +380,8 @@ class Client:
     grava o download, então o menu continua disponível durante a
     transferência. Com um download ativo (pedido pendente, transferência ou
     verificação final), recusa localmente sem perguntar o caminho: só a
-    receptora encerra o download ativo, depois da publicação ou da falha."""
+    receptora encerra o download ativo, depois da publicação, da falha ou da
+    interrupção."""
     active = self._download
     if active is not None:
       show(f"Já existe um download ativo ({active.path}); aguarde sua conclusão antes de pedir outro arquivo.")
@@ -443,9 +444,9 @@ class Client:
       self._finish_download(download, fields.get("sha256"))
 
   def _finish_download(self, download, sha256):
-    """FILE_END: verifica e publica, descarta o temporário e exibe o
-    resultado, seguido da falha ao remover o temporário, se houver. O
-    download deixa de estar ativo mesmo que algo falhe no caminho."""
+    """FILE_END: verifica e publica e então encerra o download com o
+    resultado. O download deixa de estar ativo mesmo que algo falhe no
+    caminho."""
     report = []
     try:
       try:
@@ -455,30 +456,57 @@ class Client:
       else:
         report.append(f"Download concluído: {download.path} publicado em {download.destination}")
     finally:
-      self._download = None
-      try:
-        download.discard()
-      except TemporaryNotRemoved as error:
-        report.append(str(error))
-    self._show_received("\n".join(report))
+      self._end_download(download, report)
+
+  def _interrupt_download(self):
+    """Fim da sessão com download ativo, por Sair ou desconexão: nada é
+    publicado e não há retomada."""
+    download = self._download
+    if download is not None:
+      self._end_download(download, [
+        f"Download de {download.path} interrompido: nada foi publicado. "
+        "Solicite-o novamente para baixá-lo desde o início."
+      ])
+
+  def _end_download(self, download, report):
+    """Único fim de `download`, o download ativo, seja concluído, falho ou
+    interrompido: ele deixa de estar ativo, o temporário é descartado e as
+    linhas de `report` são exibidas, seguidas da falha ao remover o
+    temporário, se houver."""
+    self._download = None
+    try:
+      download.discard()
+    except TemporaryNotRemoved as error:
+      report.append(str(error))
+    if report:
+      self._show_received("\n".join(report))
 
   def _receive_loop(self):
+    """Recebe até a conexão terminar. A sessão acaba quando a receptora
+    para, por qualquer motivo: o download ativo é interrompido e, se a saída
+    não foi pedida, a desconexão é exibida sem esperar o teclado."""
+    try:
+      self._receive_until_end()
+    finally:
+      self._disconnected.set()
+      self._interrupt_download()
+      if not self._leaving.is_set():
+        show("\nDesconectado do servidor. Pressione Enter para sair.")
+
+  def _receive_until_end(self):
     while True:
       try:
         message = p.receive_message(self._sock)
       except (p.ProtocolError, OSError):
-        message = None
+        return
       if message is None:
-        break
+        return
       if message.type == p.CHAT and isinstance(message.content, dict):
         self._show_received(f"[{message.content.get('origin')}] {message.content.get('text')}")
       elif message.type == p.ERROR and isinstance(message.content, dict):
         self._receive_error(message.content)
       elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
         self._receive_download(message)
-    self._disconnected.set()
-    if not self._leaving.is_set():
-      show("\nDesconectado do servidor. Pressione Enter para sair.")
 
 
 def main():

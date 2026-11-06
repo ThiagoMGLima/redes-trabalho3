@@ -4,6 +4,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -509,6 +510,45 @@ class SessionTest(unittest.TestCase):
     except ConnectionResetError:
       pass
     self.assertNotIn(b"Servidor", received)
+    self.assertEqual(closes, ["QUIT"])
+
+  def file_to_send(self):
+    """Arquivo aberto em modo binário, como o servidor o entrega a
+    `send_file`."""
+    file = tempfile.TemporaryFile()
+    self.addCleanup(file.close)
+    file.write(bytes(range(256)) * 64)
+    file.seek(0)
+    return file
+
+  def test_close_releases_the_socket_and_a_file_still_waiting_in_the_queue(self):
+    """O arquivo foi entregue à sessão, mas a escritora, bloqueada no meio de
+    uma mensagem anterior, ainda não começou a enviá-lo."""
+    session, peer, closes = self.open_session(small_buffers=True, send_timeout=5)
+    for _ in range(4):
+      session.send(p.FILE_DATA, b"\0" * (64 * 1024))
+    waiting = self.file_to_send()
+    session.send_file(waiting)
+
+    session.close("QUIT")
+
+    self.assertFinished(session)
+    self.assertTrue(waiting.closed)
+    self.assertEqual(session.sock.fileno(), -1)
+    self.assertEqual(closes, ["QUIT"])
+
+  def test_file_handed_over_after_close_is_closed_without_being_sent(self):
+    """Um pedido atendido enquanto outra thread encerra a sessão: o arquivo
+    aberto para ele é liberado mesmo assim."""
+    session, peer, closes = self.open_session()
+    session.close("QUIT")
+    self.assertFinished(session)
+
+    late = self.file_to_send()
+    session.send_file(late)
+
+    self.assertTrue(late.closed)
+    self.assertPeerSeesEnd(peer)
     self.assertEqual(closes, ["QUIT"])
 
   def test_unexpected_failure_handling_a_message_still_runs_the_cleanup(self):
