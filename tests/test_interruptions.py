@@ -15,7 +15,7 @@ import protocol as p
 from server import Server
 from tests.support import (
   LogRecorder, OutputReader, ScriptedServerTestCase, ThreadErrors, free_port, install_programs, receive_within,
-  wait_until,
+  shut_down_within, wait_until,
 )
 from tests.test_download import CONCLUDED, files_under, share
 from tests.test_server import address_of
@@ -171,7 +171,7 @@ class RelayedDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, **server_options)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
     self.relay = Relay(self, self.server.address)
     self.client = subprocess.Popen(
       [sys.executable, "-u", os.path.join(program, "client.py"), *map(str, self.relay.address)],
@@ -406,7 +406,7 @@ class ServerInterruptionTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, send_timeout=60)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self):
     sock = socket.create_connection(self.server.address, timeout=5)

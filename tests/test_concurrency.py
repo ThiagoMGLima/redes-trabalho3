@@ -13,7 +13,7 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, ScriptedServerTestCase, receive_within, wait_until
+from tests.support import LogRecorder, ScriptedServerTestCase, receive_within, shut_down_within, wait_until
 from tests.test_download import CONCLUDED, SIZE_12_MIB, files_under, share
 
 ACTIVE_DOWNLOAD = "Já existe um download ativo"
@@ -30,7 +30,7 @@ class ServerConcurrencyTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self):
     """Participante com buffer de recepção pequeno: quando ele para de ler,

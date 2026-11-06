@@ -66,6 +66,44 @@ class Swapper:
       self._swaps += 1
 
 
+CLEANUP_LIMIT = 10.0
+
+
+def _live_threads(*ignored):
+  return sorted(thread.name for thread in threading.enumerate() if thread.is_alive() and thread not in ignored)
+
+
+def shut_down_within(server, timeout=CLEANUP_LIMIT):
+  """Encerra `server` numa thread à parte e falha, em vez de travar a suíte,
+  se o encerramento não terminar em `timeout` segundos, o que indica uma
+  thread do servidor que não finalizou. O encerramento continua esperando
+  todas as sessões, como na produção; só o teste deixa de esperar."""
+  failures = []
+
+  def stop():
+    try:
+      server.shutdown()
+    except BaseException as error:
+      failures.append(error)
+  stopping = threading.Thread(target=stop, name="encerramento no teste", daemon=True)
+  stopping.start()
+  stopping.join(timeout)
+  if stopping.is_alive():
+    raise AssertionError(f"o encerramento do servidor não terminou em {timeout} s; threads vivas: "
+                         f"{_live_threads(stopping, threading.current_thread())}")
+  if failures:
+    raise failures[0]
+
+
+def finish_within(session, timeout=5.0):
+  """Espera as threads de `session` e falha se alguma continuar viva depois
+  de `timeout` segundos."""
+  session.join(timeout)
+  if session.is_alive():
+    raise AssertionError(f"a sessão não finalizou em {timeout} s; threads vivas: "
+                         f"{_live_threads(threading.current_thread())}")
+
+
 def receive_within(sock, timeout=5.0):
   """Recebe o próximo frame, falhando se nenhum começar a chegar a tempo.
   Preserva o timeout do socket, que o protocolo torna não bloqueante."""

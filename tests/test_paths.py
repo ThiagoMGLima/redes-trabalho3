@@ -10,7 +10,9 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import CAN_EXCHANGE, LogRecorder, ScriptedServerTestCase, Swapper, receive_within, wait_until
+from tests.support import (
+  CAN_EXCHANGE, LogRecorder, ScriptedServerTestCase, Swapper, receive_within, shut_down_within, wait_until,
+)
 from tests.test_download import CONCLUDED, files_under, share
 
 FORBIDDEN = "Caminho inválido ou proibido"
@@ -72,7 +74,7 @@ class SharedRootTest(unittest.TestCase):
   def start_server(self, shared_root=None):
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=shared_root or self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self):
     sock = socket.create_connection(self.server.address, timeout=5)

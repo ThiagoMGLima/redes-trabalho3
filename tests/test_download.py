@@ -9,7 +9,8 @@ import unittest
 import protocol as p
 from server import Server
 from tests.support import (
-  LogRecorder, OutputReader, ScriptedServerTestCase, free_port, install_programs, receive_within, wait_until,
+  LogRecorder, OutputReader, ScriptedServerTestCase, free_port, install_programs, receive_within,
+  shut_down_within, wait_until,
 )
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -55,7 +56,7 @@ class ServerDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self, small_receive_buffer=False):
     """Com buffer de recepção pequeno, o servidor só avança alguns blocos
@@ -221,7 +222,7 @@ class ClientDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
     self.client = subprocess.Popen(
       [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(self.server.address[1])],
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.working_dir,

@@ -12,7 +12,10 @@ import weakref
 
 import protocol as p
 from server import Server, Session
-from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, receive_within, tcp_pair, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ThreadErrors, finish_within, free_port, receive_within, shut_down_within, tcp_pair,
+  wait_until,
+)
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")
 
@@ -27,7 +30,7 @@ class ServerTestCase(unittest.TestCase):
     log = LogRecorder()
     server = Server("127.0.0.1", 0, log=log, **options)
     server.start()
-    self.addCleanup(server.shutdown)
+    self.addCleanup(shut_down_within, server)
     return server, log
 
   def connect(self, server, log):
@@ -400,7 +403,7 @@ class SessionTest(unittest.TestCase):
       on_close=lambda session, reason: closes.append(reason),
     )
     session.start()
-    self.addCleanup(session.join, 5)
+    self.addCleanup(finish_within, session)
     self.addCleanup(session.close, "fim do teste")
     return session, peer, closes
 

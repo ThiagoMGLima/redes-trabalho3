@@ -6,7 +6,7 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, receive_within, wait_until
+from tests.support import LogRecorder, OutputReader, receive_within, shut_down_within, wait_until
 
 CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "client.py")
 PROMPT = "Escolha uma opção"
@@ -21,7 +21,7 @@ class ClientSessionTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
     self.client = subprocess.Popen(
       [sys.executable, "-u", CLIENT_SCRIPT, "127.0.0.1", str(self.server.address[1])],
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
