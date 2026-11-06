@@ -6,10 +6,12 @@ servidor por um repasse que decide quantos bytes do servidor lhe são
 entregues: o teste segura cada download no meio pelo tempo que quiser, sem
 depender de um arquivo terminar rápido ou devagar.
 """
+import hashlib
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 import protocol as p
@@ -120,6 +122,50 @@ class TerminalAcceptanceTest(unittest.TestCase):
     self.assertPublishedAsTheOrigin(second, "segundo/grande.bin", SIZE_12_MIB, second_sha256)
     self.assertPublishedAsTheOrigin(second, "vazio.txt", 0, EMPTY_SHA256)
     self.assertEqual(self.log.matching("Desconectado:"), [])
+
+  def download_small(self, client, path, content):
+    """Baixa por inteiro um arquivo pequeno já compartilhado, deixando o
+    repasse entregar exatamente seus frames."""
+    frames = (p.FILE_META, {"size": len(content)}), (p.FILE_DATA, content), \
+             (p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
+    client.relay.allow(sum(len(p.encode(*frame)) for frame in frames))
+    client.request(path)
+    client.wait_for_conclusion(path)
+
+  def test_server_shutdown_during_two_downloads_is_reported_by_both_clients_which_publish_nothing_and_keep_what_was_concluded(self):
+    """Cada cliente já concluiu um download e tem outro parado no meio quando
+    o servidor é encerrado. O encerramento não espera as transferências, e
+    cada cliente exibe a desconexão sem que se pressione Enter, interrompe o
+    download ativo sem anunciá-lo, descarta o temporário e mantém o arquivo
+    concluído."""
+    share(self.shared_root, "pronto.txt", b"pronto")
+    share(self.shared_root, "grande.bin", os.urandom(SIZE_12_MIB))
+    clients = [self.start_client("cliente-a"), self.start_client("cliente-b")]
+    for client in clients:
+      self.download_small(client, "pronto.txt", b"pronto")
+      client.relay.allow(whole_frames(SIZE_12_MIB, 2))
+      client.request("grande.bin")
+    for client in clients:
+      client.wait_for_temporary_with(2 * p.CHUNK_SIZE)
+
+    stopping = threading.Thread(target=self.server.shutdown, daemon=True)
+    stopping.start()
+    stopping.join(5)
+    self.assertFalse(stopping.is_alive(), "o encerramento esperou as transferências")
+    for client in clients:
+      client.relay.allow()
+
+    for client in clients:
+      client.output.wait_for("Desconectado do servidor")
+      self.assertIn("Download de grande.bin interrompido", client.output.text)
+      self.assertEqual(client.output.text.count(CONCLUDED), 1)
+      self.assertEqual(files_under(client.downloads_root), ["pronto.txt"])
+      with open(client.downloaded("pronto.txt"), "rb") as file:
+        self.assertEqual(file.read(), b"pronto")
+    for client in clients:
+      client.process.stdin.close()
+      self.assertEqual(client.process.wait(5), 0)
+      self.assertNotIn("Traceback", client.output.text)
 
 
 if __name__ == "__main__":
