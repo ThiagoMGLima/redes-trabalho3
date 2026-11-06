@@ -171,7 +171,8 @@ class FileTransfer:
 
 
 class Session:
-  """Atendimento de uma conexão aceita.
+  """Atendimento de uma conexão aceita, cujo participante tem o
+  identificador do cliente `client_id`, atribuído pelo servidor.
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
@@ -185,10 +186,10 @@ class Session:
 
   _STOP = object()
 
-  def __init__(self, sock, name, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+  def __init__(self, sock, client_id, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
                on_message=None, on_close=None):
     self.sock = sock
-    self.name = name
+    self.client_id = client_id
     self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._on_message = on_message
@@ -197,8 +198,8 @@ class Session:
     self._closed = False
     self._download_active = False
     self._outgoing = queue.Queue(MAX_PENDING)
-    self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
-    self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
+    self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {client_id}")
+    self._writer = threading.Thread(target=self._write_loop, name=f"escritora {client_id}")
 
   def start(self):
     self._writer.start()
@@ -441,7 +442,7 @@ class Server:
   def _end_session(self, session, reason):
     with self._lock:
       address = self._sessions.pop(session)
-    self._log(f"Desconectado: {address} como {session.name} ({reason})")
+    self._log(f"Desconectado: {address} como {session.client_id} ({reason})")
 
   def _handle_message(self, session, message):
     if message.type == p.CHAT:
@@ -453,7 +454,7 @@ class Server:
     if message.type == p.QUIT:
       self._refuse(session, p.QUIT, p.INVALID_REQUEST, "QUIT exige um objeto vazio")
       return
-    self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: só o servidor envia essa mensagem")
+    self._log(f"{p.TYPE_NAMES[message.type]} de {session.client_id} ignorado: só o servidor envia essa mensagem")
 
   def _receive_chat(self, session, content):
     text = content.get("text") if isinstance(content, dict) else None
@@ -465,7 +466,7 @@ class Server:
     except p.InvalidChatText as error:
       self._refuse(session, p.CHAT, p.INVALID_CHAT, str(error))
       return
-    self._deliver(session.name, text, skip=session)
+    self._deliver(session.client_id, text, skip=session)
 
   def _receive_file_request(self, session, content):
     """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
