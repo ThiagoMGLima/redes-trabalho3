@@ -305,7 +305,7 @@ class Session:
         return f"falha na conexão: {error}"
       if message is None:
         return "conexão encerrada pelo cliente"
-      if message.type == p.QUIT:
+      if message.type == p.QUIT and message.content == {}:
         return "QUIT"
       if self._on_message is not None:
         self._on_message(self, message)
@@ -466,7 +466,10 @@ class Server:
     if message.type == p.FILE_REQUEST:
       self._receive_file_request(session, message.content)
       return
-    self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
+    if message.type == p.QUIT:
+      self._refuse(session, "QUIT", p.INVALID_REQUEST, "QUIT exige um objeto vazio")
+      return
+    self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: só o servidor envia essa mensagem")
 
   def _receive_chat(self, session, content):
     text = content.get("text") if isinstance(content, dict) else None

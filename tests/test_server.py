@@ -391,6 +391,47 @@ class ChatTest(ServerTestCase):
     self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
 
 
+class ControlMessageTest(ServerTestCase):
+  def test_quit_that_is_not_an_empty_object_gets_invalid_request_and_the_session_is_kept(self):
+    """QUIT exige um objeto vazio; JSON válido com outro conteúdo é uma
+    recusa normal, e um QUIT vazio em seguida encerra a sessão."""
+    server, log = self.start_server()
+    client = self.connect(server, log)
+
+    for content in [{"motivo": "tchau"}, [], "sair", None, 0]:
+      client.sendall(p.encode(p.QUIT, content))
+      error = receive_within(client)
+      self.assertEqual(error.type, p.ERROR, content)
+      self.assertEqual((error.content["operation"], error.content["code"]), ("QUIT", p.INVALID_REQUEST))
+      self.assertTrue(error.content["message"])
+    self.assertEqual(log.matching("Desconectado:"), [])
+
+    client.sendall(p.encode(p.QUIT, {}))
+    self.assertClosedByServer(client)
+    self.assertIn("QUIT", log.wait_for(f"Desconectado: {address_of(client)}"))
+
+  def test_messages_that_only_the_server_sends_are_ignored_and_logged_as_such(self):
+    """FILE_META, FILE_DATA, FILE_END e ERROR vindos de um cliente são
+    ignorados: o registro diz isso, nada é respondido e a sessão continua."""
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+    sent = {
+      "FILE_META": {"size": 3}, "FILE_DATA": b"abc", "FILE_END": {"sha256": "0" * 64},
+      "ERROR": {"operation": "CHAT", "code": p.INVALID_CHAT, "message": "x"},
+    }
+
+    for name, content in sent.items():
+      sender.sendall(p.encode(getattr(p, name), content))
+    sender.sendall(p.encode(p.CHAT, {"text": "depois"}))
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "depois"}))
+    for name in sent:
+      self.assertIn("só o servidor envia", log.wait_for(f"{name} de Cliente 1 ignorado"))
+    self.assertEqual(log.matching("ainda não suportado"), [])
+    self.assertStillOpen(sender)
+
+
 class Content(dict):
   """Conteúdo de controle que pode ser observado por referência fraca."""
 
