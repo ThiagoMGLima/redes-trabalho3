@@ -210,21 +210,32 @@ class Download:
     self._identity = None
 
   def start(self, size):
-    """Cria as pastas que faltam sob a raiz de downloads e o temporário. Se
-    o caminho tiver deixado de ser permitido desde o pedido, nada é gravado
-    e o download falha ao receber FILE_END."""
+    """FILE_META: cria as pastas que faltam sob a raiz de downloads e o
+    temporário. Se o caminho tiver deixado de ser permitido desde o pedido,
+    nada é gravado e o download falha ao receber FILE_END. Um FILE_META
+    repetido, ou depois de blocos, não cria outro temporário: o tamanho
+    anunciado ficou ambíguo, e o download falha ao receber FILE_END."""
+    if self.started:
+      self._fail("o servidor enviou FILE_META repetido")
+      return
     self.started = True
     self._size = size
     try:
       self._folder = open_download_folder(self._downloads_root, self._folders, create=True)
       descriptor, self._temp_name = _create_temporary(self._folder)
     except (p.ForbiddenPath, DestinationTaken, OSError) as error:
-      self._failure = _failure_reason(error)
+      self._fail(_failure_reason(error))
       return
     self._identity = _identity(os.fstat(descriptor))
     self._temp = os.fdopen(descriptor, "wb")
 
   def write(self, block):
+    """FILE_DATA: grava o bloco no temporário. Um bloco antes de FILE_META
+    chega sem tamanho anunciado: nada é gravado, e o download falha ao
+    receber FILE_END."""
+    if not self.started:
+      self.started = True
+      self._fail("o servidor enviou FILE_DATA antes de FILE_META")
     if self._failure is not None:
       return
     self._temp.write(block)
@@ -241,6 +252,8 @@ class Download:
     `_check_publication`. Levanta DownloadFailed com o motivo, inclusive
     uma falha local ao publicar, ou PublicationNotUndone. Publicado ou não,
     o temporário continua lá até `discard`."""
+    if not self.started:
+      raise DownloadFailed("o servidor enviou FILE_END antes de FILE_META")
     if self._failure is not None:
       raise DownloadFailed(self._failure)
     self._temp.close()
@@ -290,6 +303,11 @@ class Download:
       raise PublicationNotUndone(f"{reason}; não foi possível desfazer a publicação ({error.strerror}), "
                                  "e o arquivo publicado continua na pasta em que foi publicado") from None
     raise DownloadFailed(reason)
+
+  def _fail(self, reason):
+    """Registra o primeiro motivo pelo qual o download vai falhar."""
+    if self._failure is None:
+      self._failure = reason
 
   def discard(self):
     """Ao fim do download, concluído ou não: fecha o temporário e a pasta do

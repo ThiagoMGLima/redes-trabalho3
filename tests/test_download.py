@@ -393,6 +393,43 @@ class ScriptedServerDownloadTest(ScriptedServerTestCase):
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
 
+  def assertSessionContinuesWithoutLeftovers(self):
+    """Nada foi publicado nem ficou temporário; a receptora segue exibindo
+    o chat e o download seguinte é concluído."""
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.send(p.CHAT, {"origin": "Servidor", "text": "a sessão continua"})
+    self.output.wait_for("[Servidor] a sessão continua")
+    abc = hashlib.sha256(b"abc").hexdigest()
+    self.request("certo.bin")
+    self.serve(3, [b"abc"], abc)
+    self.output.wait_for(CONCLUDED)
+    self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
+    self.assertNotIn("Traceback", self.output.text)
+
+  def test_file_data_or_file_end_before_file_meta_fails_the_download(self):
+    """Sem FILE_META antes dos blocos, o tamanho não foi anunciado e o
+    download não pode ser verificado: ele falha ao receber FILE_END."""
+    abc = hashlib.sha256(b"abc").hexdigest()
+    self.request("dados-antes.bin")
+    self.send(p.FILE_DATA, b"abc")
+    self.serve(3, [b"abc"], abc)
+    self.output.wait_for("Download de dados-antes.bin falhou")
+
+    self.request("fim-antes.bin")
+    self.send(p.FILE_END, {"sha256": EMPTY_SHA256})
+    self.output.wait_for("Download de fim-antes.bin falhou")
+
+    self.assertSessionContinuesWithoutLeftovers()
+
+  def test_repeated_file_meta_fails_the_download_without_leaving_a_temporary(self):
+    self.request("repetido.bin")
+    self.send(p.FILE_META, {"size": 3})
+    self.serve(3, [b"abc"], hashlib.sha256(b"abc").hexdigest())
+
+    self.output.wait_for("Download de repetido.bin falhou")
+    self.assertSessionContinuesWithoutLeftovers()
+
 
 
 class WorkingDirectoryTest(unittest.TestCase):
