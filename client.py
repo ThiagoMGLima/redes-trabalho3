@@ -11,7 +11,6 @@ import threading
 import protocol as p
 
 HOST = "127.0.0.1"
-PORT = 50007
 DOWNLOADS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 
 MENU = """
@@ -37,16 +36,6 @@ def show(text):
   intercalam suas linhas."""
   with _output_lock:
     print(text, flush=True)
-
-
-def parse_port(text):
-  try:
-    port = int(text)
-  except ValueError:
-    raise argparse.ArgumentTypeError("a porta deve ser um número")
-  if not 1024 < port <= 65535:
-    raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
-  return port
 
 
 class DestinationTaken(Exception):
@@ -76,12 +65,6 @@ def check_destination(root, path):
   if stat.S_ISLNK(mode):
     raise p.ForbiddenPath(f"{path} é um link simbólico")
   raise DestinationTaken(f"já existe algo em {destination}; o objeto existente foi preservado")
-
-
-# Uma pasta é aberta sem seguir links, e o descritor obtido é o ponto de
-# partida da operação seguinte; o caminho não é resolvido de novo pelo nome.
-# O_PATH, onde existe, dispensa a permissão de leitura, como o exame por nome.
-_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
 
 
 def open_download_folder(root, names, create=False):
@@ -129,7 +112,7 @@ def _open_folder(name, parent, shown, location):
   completo, sem `parent`), aberta sem seguir links. `shown` e `location`
   nomeiam a pasta nas recusas."""
   try:
-    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+    return os.open(name, p.FOLDER_FLAGS, dir_fd=parent)
   except OSError as error:
     failure = error
   try:
@@ -594,7 +577,8 @@ class Client:
 def main():
   parser = argparse.ArgumentParser(description="Cliente TCP de chat coletivo e transferência de arquivos")
   parser.add_argument("host", nargs="?", default=HOST, help=f"endereço do servidor (padrão {HOST})")
-  parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
+  parser.add_argument("port", nargs="?", type=p.parse_port, default=p.DEFAULT_PORT,
+                      help=f"porta TCP (padrão {p.DEFAULT_PORT})")
   args = parser.parse_args()
   # Bytes digitados que não formam UTF-8 viram substitutos isolados, que o
   # menu não reconhece e p.check_chat_text e p.check_relative_path recusam,

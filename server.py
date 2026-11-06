@@ -13,7 +13,6 @@ import threading
 import protocol as p
 
 HOST = ""
-PORT = 50007
 SERVER_ORIGIN = "Servidor"
 SHARED_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
 MAX_CLIENTS = 10
@@ -22,16 +21,6 @@ MAX_PENDING = 64
 
 def terminal_log(line):
   print(line, flush=True)
-
-
-def parse_port(text):
-  try:
-    port = int(text)
-  except ValueError:
-    raise argparse.ArgumentTypeError("a porta deve ser um número")
-  if not 1024 < port <= 65535:
-    raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
-  return port
 
 
 class FileRefused(Exception):
@@ -100,11 +89,6 @@ def _shown(path):
   return f"{path[:half]}…{path[-half:]}"
 
 
-# Uma pasta é aberta sem seguir links; O_PATH, onde existe, dispensa a
-# permissão de leitura, como o exame por nome.
-_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
-
-
 def _open_folder(name, parent, shown, path):
   """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
   completo, sem `parent`), aberta sem seguir links. Uma falha é
@@ -112,7 +96,7 @@ def _open_folder(name, parent, shown, path):
   é pasta é NOT_FOUND e as demais seguem `_refusal_for`. Na recusa, `shown`
   nomeia a pasta e `path`, o caminho pedido, ambos já encurtados."""
   try:
-    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+    return os.open(name, p.FOLDER_FLAGS, dir_fd=parent)
   except OSError as error:
     failure = error
   try:
@@ -360,7 +344,7 @@ class Session:
 
 
 class Server:
-  def __init__(self, host=HOST, port=PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
                log=terminal_log, shared_root=SHARED_ROOT):
     self._host = host
     self._port = port
@@ -534,7 +518,8 @@ def read_operator_input(server):
 
 def main():
   parser = argparse.ArgumentParser(description="Servidor TCP de chat coletivo e transferência de arquivos")
-  parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
+  parser.add_argument("port", nargs="?", type=p.parse_port, default=p.DEFAULT_PORT,
+                      help=f"porta TCP (padrão {p.DEFAULT_PORT})")
   args = parser.parse_args()
   # Bytes digitados que não formam UTF-8 viram substitutos isolados, que
   # p.check_chat_text recusa, em vez de interromper input() com exceção.
