@@ -300,7 +300,12 @@ class Download:
       return
     try:
       if self._temp is not None:
-        self._temp.close()
+        try:
+          self._temp.close()
+        except OSError:
+          # Depois de uma falha de gravação, o fechamento repete a falha ao
+          # tentar gravar o que ficou pendente; o conteúdo vai ser descartado.
+          pass
       try:
         if self._temp_name is not None and self._is_temporary(self._temp_name):
           os.unlink(self._temp_name, dir_fd=self._folder)
@@ -557,7 +562,15 @@ class Client:
       elif message.type == p.ERROR and isinstance(message.content, dict):
         self._receive_error(message.content)
       elif message.type in (p.FILE_META, p.FILE_DATA, p.FILE_END):
-        self._receive_download(message)
+        download = self._download
+        try:
+          self._receive_download(message)
+        except OSError as error:
+          # Falha local ao gravar o temporário. A Q7 da #5 não definiu
+          # política própria para ela: a sessão termina, com a limpeza de
+          # qualquer fim de sessão.
+          self._show_received(f"Falha local ao gravar o download de {download.path}: {error.strerror}.")
+          return
 
 
 def main():

@@ -1,6 +1,7 @@
 """Interrupções de um download ativo: Sair, perda de conexão, prazo e
 encerramento do servidor, observados pela fronteira TCP."""
 import hashlib
+import importlib.util
 import os
 import signal
 import socket
@@ -287,18 +288,6 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
     self.assertEqual(self.client.wait(5), 0)
     self.assertNotIn("Traceback", self.output.text)
 
-  def assertConnectionEndedByTheClient(self):
-    """O cliente encerrou a conexão sem esperar Enter: o lado do servidor
-    vê o fim do stream, sem outro byte."""
-    self.server_side.settimeout(5)
-    try:
-      data = self.server_side.recv(65536)
-    except ConnectionResetError:
-      data = b""
-    except TimeoutError:
-      self.fail("o cliente manteve a conexão aberta à espera de Enter")
-    self.assertEqual(data, b"")
-
   def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0, connection_open=False):
     """Um download é concluído e outro está em andamento quando a sessão
     termina: a desconexão aparece em até `timeout` segundos sem que se
@@ -376,6 +365,45 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
     self.type_line("1")
     self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
     self.assertExitsAfterEnter()
+
+
+# Inicia o comando seguinte com um limite para o tamanho dos arquivos
+# gravados, como num disco cheio: acima dele, a gravação falha com EFBIG em
+# vez de encerrar o processo com SIGXFSZ.
+LIMITED_FILE_SIZE = (
+  "import os, resource, signal, sys; signal.signal(signal.SIGXFSZ, signal.SIG_IGN); "
+  "resource.setrlimit(resource.RLIMIT_FSIZE, (int(sys.argv[1]), int(sys.argv[1]))); os.execv(sys.argv[2], sys.argv[2:])"
+)
+
+
+@unittest.skipUnless(importlib.util.find_spec("resource") and hasattr(signal, "SIGXFSZ"), "requer RLIMIT_FSIZE")
+class LocalWriteFailureTest(ScriptedServerTestCase):
+  """O cliente não consegue gravar arquivos de mais de 10.000 bytes, e o
+  teste faz o papel do servidor."""
+
+  def client_command(self, command):
+    return [sys.executable, "-c", LIMITED_FILE_SIZE, "10000", *command]
+
+  def test_local_write_failure_ends_the_session_reporting_it_and_removing_the_temporary(self):
+    """A Q7 da #5 não definiu política própria para a falha de gravação
+    local, e a sessão termina, como antes. O fim é o de qualquer sessão: a
+    falha e a interrupção do download são informadas, o temporário é
+    removido, a desconexão aparece e a conexão é encerrada sem esperar
+    Enter."""
+    self.request("aulas/grande.bin")
+
+    self.server_side.sendall(p.encode(p.FILE_META, {"size": 2 * p.CHUNK_SIZE})
+                             + p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE)) * 2)
+
+    self.output.wait_for("Desconectado do servidor")
+    self.assertIn("Falha local ao gravar o download de aulas/grande.bin", self.output.text)
+    self.assertIn("Download de aulas/grande.bin interrompido", self.output.text)
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertConnectionEndedByTheClient()
+    self.client.stdin.close()
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn("Traceback", self.output.text)
 
 
 def stalled_download(test, address, path, wait_connected):

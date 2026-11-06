@@ -294,8 +294,9 @@ class ScriptedServerTestCase(unittest.TestCase):
     listener = socket.create_server(("127.0.0.1", 0))
     self.addCleanup(listener.close)
     listener.settimeout(5)
+    command = [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])]
     self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      self.client_command(command),
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.base,
       encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
@@ -306,6 +307,23 @@ class ScriptedServerTestCase(unittest.TestCase):
     self.addCleanup(self.client.stdin.close)
     self.server_side, _ = listener.accept()
     self.addCleanup(self.server_side.close)
+
+  def client_command(self, command):
+    """Linha de comando que inicia o cliente; uma subclasse pode mudar o
+    ambiente do processo antes de executá-la."""
+    return command
+
+  def assertConnectionEndedByTheClient(self):
+    """O cliente encerrou a conexão sem esperar Enter: o lado do servidor
+    vê o fim do stream, sem outro byte."""
+    self.server_side.settimeout(5)
+    try:
+      data = self.server_side.recv(65536)
+    except ConnectionResetError:
+      data = b""
+    except TimeoutError:
+      self.fail("o cliente manteve a conexão aberta à espera de Enter")
+    self.assertEqual(data, b"")
 
   def type_line(self, line):
     self.client.stdin.write(line + "\n")
