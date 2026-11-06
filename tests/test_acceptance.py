@@ -136,7 +136,7 @@ class TerminalAcceptanceTest(unittest.TestCase):
     """Cada cliente já concluiu um download e tem outro parado no meio quando
     o servidor é encerrado. O encerramento não espera as transferências, e
     cada cliente exibe a desconexão sem que se pressione Enter, interrompe o
-    download ativo sem anunciá-lo, descarta o temporário e mantém o arquivo
+    download ativo sem anunciá-lo, descarta o temporário e mantém o download
     concluído."""
     share(self.shared_root, "pronto.txt", b"pronto")
     share(self.shared_root, "grande.bin", os.urandom(SIZE_12_MIB))
