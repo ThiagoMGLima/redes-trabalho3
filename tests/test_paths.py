@@ -11,7 +11,8 @@ import unittest
 import protocol as p
 from server import Server
 from tests.support import (
-  CAN_EXCHANGE, LogRecorder, ScriptedServerTestCase, Swapper, receive_within, shut_down_within, wait_until,
+  CAN_EXCHANGE, CAN_WATCH, CreationWatcher, LogRecorder, ScriptedServerTestCase, Swapper, receive_within,
+  shut_down_within, wait_until,
 )
 from tests.test_download import CONCLUDED, files_under, share
 
@@ -606,6 +607,98 @@ class DownloadsRootTest(ScriptedServerTestCase):
       if concluded:
         with open(self.downloaded(f"aulas/2024/{number}.bin"), "rb") as file:
           self.assertEqual(file.read(), content, number)
+
+  def result_line(self, path):
+    """Linha em que o cliente anunciou o resultado do download de `path`."""
+    [line] = [line for line in self.output.text.splitlines()
+              if line.startswith((f"Download de {path} falhou", f"{CONCLUDED}: {path} publicado"))]
+    return line
+
+  # Pasta do destino nos testes de corrida com a publicação: a conferência
+  # que segue a publicação percorre de novo toda a cadeia a partir da raiz,
+  # e uma cadeia longa dá tempo para a reação a vencer quase sempre.
+  DEEP = "/".join(["n"] * 40)
+
+  @unittest.skipUnless(CAN_WATCH, "requer inotify")
+  def test_object_saved_over_the_destination_right_after_publication_is_never_removed(self):
+    """Assim que o nome do destino aparece, outro programa salva nele o
+    próprio arquivo com o rename usual sobre o nome. Quando a conferência
+    que segue a publicação percebe a troca, o download falha sem anunciar
+    conclusão; quando a troca vem depois dela, o download é concluído, e a
+    troca é a limitação aceita de um processo local que substitui o arquivo
+    depois da conferência final. Nos dois casos, o arquivo do outro
+    programa fica no destino. A troca precisa vencer a conferência ao
+    menos uma vez na sequência."""
+    folder = self.downloaded(self.DEEP)
+    os.makedirs(folder)
+    saving = os.path.join(folder, ".salvando")
+    saved = b"VERSAO SALVA PELO OUTRO PROGRAMA"
+    target, saves = [None], []
+
+    def save_over(name):
+      if name == target[0]:
+        os.rename(saving, os.path.join(folder, name))
+        saves.append(name)
+
+    outcomes = []
+    with CreationWatcher(folder, save_over):
+      for number in range(20):
+        with open(saving, "wb") as file:
+          file.write(saved)
+        target[0] = f"{number}.bin"
+        outcomes.append(self.try_download(f"{self.DEEP}/{number}.bin", b"conteudo verificado"))
+        self.assertTrue(wait_until(lambda: len(saves) == number + 1), "o outro programa não salvou")
+        with open(os.path.join(folder, f"{number}.bin"), "rb") as file:
+          self.assertEqual(file.read(), saved, self.result_line(f"{self.DEEP}/{number}.bin"))
+
+    self.assertNotIn(None, outcomes)
+    self.assertIn(False, outcomes, "a troca nunca venceu a conferência que segue a publicação")
+    for number, concluded in enumerate(outcomes):
+      if not concluded:
+        self.assertIn("preservado", self.result_line(f"{self.DEEP}/{number}.bin"))
+
+  @unittest.skipUnless(CAN_WATCH, "requer inotify")
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_publication_that_cannot_be_undone_is_reported_without_claiming_nothing_was_published(self):
+    """Assim que o nome do destino aparece, sua pasta é movida para outro
+    nome e deixa de aceitar escrita. Quando isso vence a conferência que
+    segue a publicação, a conferência falha e a publicação não pode ser
+    desfeita: o cliente informa a falha sem dizer que nada foi publicado.
+    Quando a publicação pôde ser desfeita, nada fica na pasta movida. A
+    mudança precisa vencer a conferência ao menos uma vez na sequência."""
+    os.makedirs(self.downloaded(self.DEEP))
+    moves = []
+
+    def move_away(folder, moved):
+      def react(name):
+        if name == "resumo.bin":
+          os.rename(folder, moved)
+          os.chmod(moved, 0o500)
+          moves.append(moved)
+      return react
+
+    for number in range(20):
+      folder = self.downloaded(f"{self.DEEP}/aulas{number}")
+      moved = self.downloaded(f"{self.DEEP}/movida{number}")
+      os.mkdir(folder)
+      self.addCleanup(lambda moved=moved: os.path.isdir(moved) and os.chmod(moved, 0o700))
+      with CreationWatcher(folder, move_away(folder, moved)):
+        self.try_download(f"{self.DEEP}/aulas{number}/resumo.bin", b"conteudo verificado")
+        self.assertTrue(wait_until(lambda: moved in moves), "a pasta não foi movida")
+
+    not_undone = 0
+    for number in range(20):
+      line = self.result_line(f"{self.DEEP}/aulas{number}/resumo.bin")
+      remains = os.path.lexists(self.downloaded(f"{self.DEEP}/movida{number}/resumo.bin"))
+      if line.startswith(CONCLUDED):
+        self.assertTrue(remains, line)
+      elif remains:
+        not_undone += 1
+        self.assertNotIn("Nada foi publicado", line)
+        self.assertIn("não foi possível desfazer a publicação", line)
+      else:
+        self.assertIn("Nada foi publicado", line)
+    self.assertGreater(not_undone, 0, "a mudança da pasta nunca venceu a conferência que segue a publicação")
 
   def test_object_in_the_place_of_a_download_folder_is_preserved(self):
     """Antes do pedido, a recusa é local; depois dele, o download falha."""

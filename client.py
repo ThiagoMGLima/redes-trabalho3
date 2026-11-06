@@ -172,7 +172,13 @@ def _failure_reason(error):
 
 
 class DownloadFailed(Exception):
-  """Download não publicado; a mensagem traz o motivo."""
+  """Download não concluído; a mensagem traz o motivo. Salvo em
+  PublicationNotUndone, nada do download ficou publicado."""
+
+
+class PublicationNotUndone(DownloadFailed):
+  """A conferência que segue a publicação falhou e a publicação não pôde
+  ser desfeita: o arquivo publicado pode continuar no destino."""
 
 
 class TemporaryNotRemoved(Exception):
@@ -229,12 +235,12 @@ class Download:
   def finish(self, sha256):
     """Exige a quantidade anunciada em FILE_META e o SHA-256 anunciado em
     FILE_END, fecha o temporário e o publica no destino sem sobrescrever.
-    Antes e depois de publicar, confirma que a pasta aberta no começo ainda
-    é a que se alcança a partir da raiz de downloads sem passar por links e
-    que o nome em questão é o próprio temporário verificado; se a
-    confirmação falhar depois de publicar, a publicação é desfeita. Levanta
-    DownloadFailed com o motivo, inclusive uma falha local ao publicar.
-    Publicado ou não, o temporário continua lá até `discard`."""
+    Antes de publicar, confirma que a pasta aberta no começo ainda é a que
+    se alcança a partir da raiz de downloads sem passar por links e que o
+    temporário é o verificado; depois, confere a publicação com
+    `_check_publication`. Levanta DownloadFailed com o motivo, inclusive
+    uma falha local ao publicar, ou PublicationNotUndone. Publicado ou não,
+    o temporário continua lá até `discard`."""
     if self._failure is not None:
       raise DownloadFailed(self._failure)
     self._temp.close()
@@ -244,18 +250,46 @@ class Download:
       raise DownloadFailed("o SHA-256 anunciado pelo servidor não corresponde ao conteúdo recebido")
     try:
       self._confirm(self._temp_name)
-      try:
-        os.link(self._temp_name, self._name, src_dir_fd=self._folder, dst_dir_fd=self._folder,
-                follow_symlinks=False)
-      except FileExistsError:
-        raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
-      try:
-        self._confirm(self._name)
-      except DownloadFailed:
-        os.unlink(self._name, dir_fd=self._folder)
-        raise
+      os.link(self._temp_name, self._name, src_dir_fd=self._folder, dst_dir_fd=self._folder, follow_symlinks=False)
+    except FileExistsError:
+      raise DownloadFailed(f"já existe algo em {self.destination}; o objeto existente foi preservado") from None
     except OSError as error:
       raise DownloadFailed(f"não foi possível publicar em {self.destination} ({error.strerror})") from None
+    self._check_publication()
+
+  def _check_publication(self):
+    """Conferência que segue a publicação: a pasta aberta no começo ainda é
+    a pasta do destino e o nome publicado guarda o temporário verificado.
+    Se não, a publicação é desfeita, mas o nome publicado só é removido se
+    ainda guardar o que o próprio link publicou: o temporário verificado
+    ou, se o temporário foi trocado logo antes do link, o objeto que agora
+    ocupa o nome do temporário. Qualquer outro objeto no destino foi posto
+    lá depois, por outro programa, e é preservado. Levanta DownloadFailed
+    com o motivo, ou PublicationNotUndone se a remoção ou a própria
+    conferência falhar."""
+    moved = self._folder_moved()
+    try:
+      published = self._identity_at(self._name)
+      if moved is None and published == self._identity:
+        return
+      linked = {self._identity, self._identity_at(self._temp_name)}
+    except OSError as error:
+      raise PublicationNotUndone(
+        f"não foi possível conferir a publicação em {self.destination} ({error.strerror}); "
+        "o arquivo publicado pode continuar lá"
+      ) from None
+    if published is None:
+      raise DownloadFailed(moved or "o arquivo publicado foi removido logo depois da publicação")
+    if published not in linked:
+      raise DownloadFailed(f"{moved or 'o destino foi substituído logo depois da publicação'}; "
+                           "o objeto que ocupa o destino foi preservado")
+    reason = moved or "o temporário foi substituído durante a transferência"
+    try:
+      os.unlink(self._name, dir_fd=self._folder)
+    except OSError as error:
+      raise PublicationNotUndone(f"{reason}; não foi possível desfazer a publicação ({error.strerror}), "
+                                 "e o arquivo publicado continua na pasta em que foi publicado") from None
+    raise DownloadFailed(reason)
 
   def discard(self):
     """Ao fim do download, concluído ou não: fecha o temporário e a pasta do
@@ -289,11 +323,15 @@ class Download:
       raise DownloadFailed("o temporário foi substituído ou removido durante a transferência")
 
   def _is_temporary(self, name):
+    return self._identity_at(name) == self._identity
+
+  def _identity_at(self, name):
+    """Identidade do objeto `name` na pasta aberta no começo, sem seguir
+    links, ou None se não houver nada com esse nome."""
     try:
-      status = os.stat(name, dir_fd=self._folder, follow_symlinks=False)
+      return _identity(os.stat(name, dir_fd=self._folder, follow_symlinks=False))
     except FileNotFoundError:
-      return False
-    return _identity(status) == self._identity
+      return None
 
   def _folder_moved(self):
     """Motivo pelo qual a pasta aberta no começo deixou de ser a pasta do
@@ -456,6 +494,8 @@ class Client:
     try:
       try:
         download.finish(sha256)
+      except PublicationNotUndone as error:
+        report.append(f"Download de {download.path} falhou: {error}.")
       except DownloadFailed as error:
         report.append(f"Download de {download.path} falhou: {error}. Nada foi publicado.")
       else:

@@ -3,6 +3,7 @@ import os
 import select
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,63 @@ class Swapper:
     while not self._stop.is_set():
       exchange(*self._paths)
       self._swaps += 1
+
+
+_IN_CREATE = 0x100
+_INOTIFY_EVENT = struct.Struct("iIII")
+
+
+def _inotify():
+  try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.inotify_init1, libc.inotify_add_watch
+  except (AttributeError, OSError):
+    return None
+
+
+_INOTIFY = _inotify()
+CAN_WATCH = _INOTIFY is not None
+
+
+class CreationWatcher:
+  """Thread que observa com inotify (Linux) a pasta `folder` e chama
+  `react(nome)` logo que um nome é criado nela, enquanto quem o criou segue
+  adiante: a reação disputa a corrida com o passo seguinte do programa.
+  Use como gerenciador de contexto."""
+
+  def __init__(self, folder, react):
+    init, add_watch = _INOTIFY
+    self._descriptor = init(0)
+    if self._descriptor < 0 or add_watch(self._descriptor, os.fsencode(folder), _IN_CREATE) < 0:
+      error = ctypes.get_errno()
+      raise OSError(error, os.strerror(error), folder)
+    self._react = react
+    self._wake_reader, self._wake_writer = os.pipe()
+    self._thread = threading.Thread(target=self._run, daemon=True)
+
+  def __enter__(self):
+    self._thread.start()
+    return self
+
+  def __exit__(self, *exc_info):
+    os.write(self._wake_writer, b"\0")
+    self._thread.join(5)
+    for descriptor in (self._descriptor, self._wake_reader, self._wake_writer):
+      os.close(descriptor)
+
+  def _run(self):
+    while True:
+      readable, _, _ = select.select([self._descriptor, self._wake_reader], [], [])
+      if self._wake_reader in readable:
+        return
+      data = os.read(self._descriptor, 65536)
+      offset = 0
+      while offset < len(data):
+        _, _, _, length = _INOTIFY_EVENT.unpack_from(data, offset)
+        start = offset + _INOTIFY_EVENT.size
+        name = os.fsdecode(data[start:start + length].rstrip(b"\0"))
+        offset = start + length
+        self._react(name)
 
 
 CLEANUP_LIMIT = 10.0
