@@ -103,7 +103,7 @@ class ServerDownloadTest(unittest.TestCase):
       client.sendall(p.encode(p.FILE_REQUEST, content))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, error)
-      self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code))
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.FILE_REQUEST], code))
       self.assertTrue(error.content["message"])
     self.request(client, "presente.txt")
 
@@ -112,12 +112,12 @@ class ServerDownloadTest(unittest.TestCase):
 
   def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
     missing = ["ausente.txt", "pasta/ausente.txt", "presente.txt/dentro.txt"]
-    self.assertRefusedKeepingTheSession([{"path": path} for path in missing], "NOT_FOUND")
+    self.assertRefusedKeepingTheSession([{"path": path} for path in missing], p.NOT_FOUND)
 
   def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
     contents = [{}, {"caminho": "presente.txt"}, {"path": None}, {"path": 7}, {"path": ["presente.txt"]},
                 ["presente.txt"], "presente.txt", None]
-    self.assertRefusedKeepingTheSession(contents, "INVALID_REQUEST")
+    self.assertRefusedKeepingTheSession(contents, p.INVALID_REQUEST)
 
   def test_forbidden_path_syntax_gets_path_forbidden_even_when_the_target_exists(self):
     with open(os.path.join(self.outside_root, "fora.txt"), "wb") as file:
@@ -129,7 +129,7 @@ class ServerDownloadTest(unittest.TestCase):
       os.path.join(self.outside_root, "fora.txt"), "C:/dados/a.txt", "C:\\dados\\a.txt", "aulas\\resumo.pdf",
       "aulas/resumo.pdf\x00", "nome\nquebrado", "tab\tulado", "escape\x1b",
     ]
-    self.assertRefusedKeepingTheSession([{"path": path} for path in forbidden], "PATH_FORBIDDEN")
+    self.assertRefusedKeepingTheSession([{"path": path} for path in forbidden], p.PATH_FORBIDDEN)
 
   def test_file_is_sent_as_meta_8_kib_blocks_and_end_with_its_sha256(self):
     content = os.urandom(2 * 8192 + 3616)

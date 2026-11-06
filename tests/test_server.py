@@ -362,7 +362,7 @@ class ChatTest(ServerTestCase):
       sender.sendall(frame)
       error = receive_within(sender)
       self.assertEqual(error.type, p.ERROR)
-      self.assertEqual((error.content["operation"], error.content["code"]), ("CHAT", code))
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.CHAT], code))
       self.assertTrue(error.content["message"])
     self.chat(sender, {"text": "válida"})
 
@@ -380,15 +380,15 @@ class ChatTest(ServerTestCase):
       "😀" * 256 + "a",
       "a" * 1023 + "é",
     ]
-    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], "INVALID_CHAT")
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], p.INVALID_CHAT)
 
   def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
     contents = [{}, {"mensagem": "oi"}, {"text": None}, {"text": 42}, {"text": ["oi"]}, ["oi"], "oi", 7, None]
-    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], "INVALID_REQUEST")
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], p.INVALID_REQUEST)
 
   def test_text_that_cannot_be_encoded_as_utf8_gets_invalid_chat(self):
     payload = b'{"text": "\\ud800"}'
-    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
+    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], p.INVALID_CHAT)
 
 
 class ControlMessageTest(ServerTestCase):
@@ -402,7 +402,7 @@ class ControlMessageTest(ServerTestCase):
       client.sendall(p.encode(p.QUIT, content))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, content)
-      self.assertEqual((error.content["operation"], error.content["code"]), ("QUIT", p.INVALID_REQUEST))
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.QUIT], p.INVALID_REQUEST))
       self.assertTrue(error.content["message"])
     self.assertEqual(log.matching("Desconectado:"), [])
 
@@ -417,17 +417,17 @@ class ControlMessageTest(ServerTestCase):
     sender = self.connect(server, log)
     other = self.connect(server, log)
     sent = {
-      "FILE_META": {"size": 3}, "FILE_DATA": b"abc", "FILE_END": {"sha256": "0" * 64},
-      "ERROR": {"operation": "CHAT", "code": p.INVALID_CHAT, "message": "x"},
+      p.FILE_META: {"size": 3}, p.FILE_DATA: b"abc", p.FILE_END: {"sha256": "0" * 64},
+      p.ERROR: {"operation": p.TYPE_NAMES[p.CHAT], "code": p.INVALID_CHAT, "message": "x"},
     }
 
-    for name, content in sent.items():
-      sender.sendall(p.encode(getattr(p, name), content))
+    for msg_type, content in sent.items():
+      sender.sendall(p.encode(msg_type, content))
     sender.sendall(p.encode(p.CHAT, {"text": "depois"}))
 
     self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "depois"}))
-    for name in sent:
-      self.assertIn("só o servidor envia", log.wait_for(f"{name} de Cliente 1 ignorado"))
+    for msg_type in sent:
+      self.assertIn("só o servidor envia", log.wait_for(f"{p.TYPE_NAMES[msg_type]} de Cliente 1 ignorado"))
     self.assertEqual(log.matching("ainda não suportado"), [])
     self.assertStillOpen(sender)
 

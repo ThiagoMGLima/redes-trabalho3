@@ -476,7 +476,7 @@ class Client:
     """Recusa normal do servidor: a sessão continua. Uma recusa de
     FILE_REQUEST encerra o download que ainda aguardava FILE_META."""
     download = self._download
-    if error.get("operation") == "FILE_REQUEST" and download is not None and not download.started:
+    if error.get("operation") == p.TYPE_NAMES[p.FILE_REQUEST] and download is not None and not download.started:
       self._download = None
     self._show_received(f"Erro do servidor em {error.get('operation')}: {error.get('message')} ({error.get('code')})")
 

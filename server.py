@@ -451,19 +451,19 @@ class Server:
       self._receive_file_request(session, message.content)
       return
     if message.type == p.QUIT:
-      self._refuse(session, "QUIT", p.INVALID_REQUEST, "QUIT exige um objeto vazio")
+      self._refuse(session, p.QUIT, p.INVALID_REQUEST, "QUIT exige um objeto vazio")
       return
     self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: só o servidor envia essa mensagem")
 
   def _receive_chat(self, session, content):
     text = content.get("text") if isinstance(content, dict) else None
     if not isinstance(text, str):
-      self._refuse(session, "CHAT", p.INVALID_REQUEST, "CHAT exige um objeto com o campo text do tipo string")
+      self._refuse(session, p.CHAT, p.INVALID_REQUEST, "CHAT exige um objeto com o campo text do tipo string")
       return
     try:
       p.check_chat_text(text)
     except p.InvalidChatText as error:
-      self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
+      self._refuse(session, p.CHAT, p.INVALID_CHAT, str(error))
       return
     self._deliver(session.name, text, skip=session)
 
@@ -472,24 +472,25 @@ class Server:
     escritora da sessão, que o envia bloco a bloco. Enquanto a sessão tem um
     download ativo, todo pedido recebe BUSY e o envio atual prossegue."""
     if session.download_active:
-      self._refuse(session, "FILE_REQUEST", p.BUSY, "Já existe um download ativo nesta sessão")
+      self._refuse(session, p.FILE_REQUEST, p.BUSY, "Já existe um download ativo nesta sessão")
       return
     path = content.get("path") if isinstance(content, dict) else None
     if not isinstance(path, str):
       self._refuse(
-        session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
+        session, p.FILE_REQUEST, p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
       )
       return
     try:
       file = open_shared_file(self._shared_root, path)
     except FileRefused as refusal:
-      self._refuse(session, "FILE_REQUEST", refusal.code, str(refusal))
+      self._refuse(session, p.FILE_REQUEST, refusal.code, str(refusal))
       return
     session.send_file(file)
 
   def _refuse(self, session, operation, code, message):
-    """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""
-    session.send(p.ERROR, {"operation": operation, "code": code, "message": message})
+    """Recusa normal da mensagem do tipo `operation`: o ERROR segue pela
+    fila da sessão, que continua aberta."""
+    session.send(p.ERROR, {"operation": p.TYPE_NAMES[operation], "code": code, "message": message})
 
   def _deliver(self, origin, text, skip=None):
     """Exibe no terminal e enfileira para os clientes conectados, exceto

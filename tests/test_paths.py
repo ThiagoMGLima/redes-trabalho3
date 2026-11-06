@@ -136,7 +136,7 @@ class SharedRootTest(unittest.TestCase):
       client.sendall(request_frame(path))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, (path, error))
-      self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code), path)
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.FILE_REQUEST], code), path)
       self.assertTrue(error.content["message"])
     client.sendall(p.encode(p.FILE_REQUEST, {"path": present}))
 
@@ -398,7 +398,7 @@ class DownloadsRootTest(ScriptedServerTestCase):
     a recusa é local, sem enviar nada nem encerrar o cliente."""
     fitting = filling_the_frame("aulas")
     self.request(fitting)
-    self.send(p.ERROR, {"operation": "FILE_REQUEST", "code": p.NOT_FOUND, "message": "Arquivo inexistente"})
+    self.send(p.ERROR, {"operation": p.TYPE_NAMES[p.FILE_REQUEST], "code": p.NOT_FOUND, "message": "Arquivo inexistente"})
     self.output.wait_for(f"({p.NOT_FOUND})")
 
     self.assertRefusedLocally([fitting + "y"], "Download recusado")

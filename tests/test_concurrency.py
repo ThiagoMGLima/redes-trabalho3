@@ -140,7 +140,7 @@ class ServerConcurrencyTest(unittest.TestCase):
 
     others = download["others"]
     self.assertEqual([(m.type, m.content["operation"], m.content["code"]) for m in others],
-                     [(p.ERROR, "FILE_REQUEST", "BUSY")] * 2)
+                     [(p.ERROR, p.TYPE_NAMES[p.FILE_REQUEST], p.BUSY)] * 2)
     self.assertTrue(all(m.content["message"] for m in others))
     self.assertIntact(finished, sha256)
 
