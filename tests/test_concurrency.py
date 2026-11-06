@@ -176,7 +176,12 @@ class ScriptedServerClientTest(ScriptedServerTestCase):
       raise AssertionError(f"segundo pedido não recusado com download {phase}: {self.output.text!r}")
     self.chat(f"menu livre com download {phase}")
 
-  def test_second_request_is_blocked_locally_while_pending_transferring_or_in_the_final_check(self):
+  def test_second_request_is_blocked_locally_while_pending_transferring_or_awaiting_file_end(self):
+    """Cobre o pedido pendente, a transferência e a espera do FILE_END com
+    todos os bytes já recebidos. A verificação final, do FILE_END ao
+    anúncio do resultado, não é coberta: nada na conexão TCP, no terminal
+    ou nas pastas faz a receptora parar nela, e uma corrida não comprovaria
+    o bloqueio. Essa limitação está registrada em docs/aceitacao.md."""
     content = os.urandom(2 * p.CHUNK_SIZE)
     self.request("primeiro.bin")
     self.assertSecondRequestBlockedLocally("pendente")
@@ -188,7 +193,7 @@ class ScriptedServerClientTest(ScriptedServerTestCase):
 
     self.send(p.FILE_DATA, content[p.CHUNK_SIZE:])
     self.wait_for_received_bytes(len(content))
-    self.assertSecondRequestBlockedLocally("aguardando o FILE_END da verificação final")
+    self.assertSecondRequestBlockedLocally("aguardando o FILE_END")
 
     self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
     self.output.wait_for(CONCLUDED)
