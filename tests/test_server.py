@@ -12,7 +12,10 @@ import weakref
 
 import protocol as p
 from server import Server, Session
-from tests.support import LogRecorder, OutputReader, ThreadErrors, free_port, receive_within, tcp_pair, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ThreadErrors, finish_within, free_port, receive_within, shut_down_within, tcp_pair,
+  wait_until,
+)
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")
 
@@ -27,7 +30,7 @@ class ServerTestCase(unittest.TestCase):
     log = LogRecorder()
     server = Server("127.0.0.1", 0, log=log, **options)
     server.start()
-    self.addCleanup(server.shutdown)
+    self.addCleanup(shut_down_within, server)
     return server, log
 
   def connect(self, server, log):
@@ -152,6 +155,22 @@ class OperatorBroadcastTest(ServerProcessTestCase):
     self.assertEqual(receive_within(client), (p.CHAT, {"origin": "Servidor", "text": "😀" * 256}))
     if not wait_until(lambda: output.text.count("Mensagem recusada") == len(refused)):
       raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
+
+  def test_operator_input_that_is_not_utf_8_is_refused_locally_and_the_server_keeps_running(self):
+    """Bytes que não formam texto UTF-8 digitados pelo operador recebem a
+    recusa local; o servidor e as sessões continuam."""
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+
+    process.stdin.buffer.write(b"ol\xe1\n\xff\xfe\n")
+    process.stdin.buffer.flush()
+    self.type_line(process, "depois da recusa")
+
+    self.assertEqual(receive_within(client), (p.CHAT, {"origin": "Servidor", "text": "depois da recusa"}))
+    if not wait_until(lambda: output.text.count("Mensagem recusada") == 2):
+      raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
+    self.assertIsNone(process.poll())
+    self.assertNotIn("Traceback", output.text)
 
 
 class OperatorEofTest(ServerProcessTestCase):
@@ -343,7 +362,7 @@ class ChatTest(ServerTestCase):
       sender.sendall(frame)
       error = receive_within(sender)
       self.assertEqual(error.type, p.ERROR)
-      self.assertEqual((error.content["operation"], error.content["code"]), ("CHAT", code))
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.CHAT], code))
       self.assertTrue(error.content["message"])
     self.chat(sender, {"text": "válida"})
 
@@ -361,15 +380,56 @@ class ChatTest(ServerTestCase):
       "😀" * 256 + "a",
       "a" * 1023 + "é",
     ]
-    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], "INVALID_CHAT")
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, {"text": text}) for text in refused], p.INVALID_CHAT)
 
   def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
     contents = [{}, {"mensagem": "oi"}, {"text": None}, {"text": 42}, {"text": ["oi"]}, ["oi"], "oi", 7, None]
-    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], "INVALID_REQUEST")
+    self.assertRefusedKeepingTheSession([p.encode(p.CHAT, content) for content in contents], p.INVALID_REQUEST)
 
   def test_text_that_cannot_be_encoded_as_utf8_gets_invalid_chat(self):
     payload = b'{"text": "\\ud800"}'
-    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], "INVALID_CHAT")
+    self.assertRefusedKeepingTheSession([bytes([p.CHAT]) + len(payload).to_bytes(4, "big") + payload], p.INVALID_CHAT)
+
+
+class ControlMessageTest(ServerTestCase):
+  def test_quit_that_is_not_an_empty_object_gets_invalid_request_and_the_session_is_kept(self):
+    """QUIT exige um objeto vazio; JSON válido com outro conteúdo é uma
+    recusa normal, e um QUIT vazio em seguida encerra a sessão."""
+    server, log = self.start_server()
+    client = self.connect(server, log)
+
+    for content in [{"motivo": "tchau"}, [], "sair", None, 0]:
+      client.sendall(p.encode(p.QUIT, content))
+      error = receive_within(client)
+      self.assertEqual(error.type, p.ERROR, content)
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.QUIT], p.INVALID_REQUEST))
+      self.assertTrue(error.content["message"])
+    self.assertEqual(log.matching("Desconectado:"), [])
+
+    client.sendall(p.encode(p.QUIT, {}))
+    self.assertClosedByServer(client)
+    self.assertIn("QUIT", log.wait_for(f"Desconectado: {address_of(client)}"))
+
+  def test_messages_that_only_the_server_sends_are_ignored_and_logged_as_such(self):
+    """FILE_META, FILE_DATA, FILE_END e ERROR vindos de um cliente são
+    ignorados: o registro diz isso, nada é respondido e a sessão continua."""
+    server, log = self.start_server()
+    sender = self.connect(server, log)
+    other = self.connect(server, log)
+    sent = {
+      p.FILE_META: {"size": 3}, p.FILE_DATA: b"abc", p.FILE_END: {"sha256": "0" * 64},
+      p.ERROR: {"operation": p.TYPE_NAMES[p.CHAT], "code": p.INVALID_CHAT, "message": "x"},
+    }
+
+    for msg_type, content in sent.items():
+      sender.sendall(p.encode(msg_type, content))
+    sender.sendall(p.encode(p.CHAT, {"text": "depois"}))
+
+    self.assertEqual(receive_within(other), (p.CHAT, {"origin": "Cliente 1", "text": "depois"}))
+    for msg_type in sent:
+      self.assertIn("só o servidor envia", log.wait_for(f"{p.TYPE_NAMES[msg_type]} de Cliente 1 ignorado"))
+    self.assertEqual(log.matching("ainda não suportado"), [])
+    self.assertStillOpen(sender)
 
 
 class Content(dict):
@@ -400,7 +460,7 @@ class SessionTest(unittest.TestCase):
       on_close=lambda session, reason: closes.append(reason),
     )
     session.start()
-    self.addCleanup(session.join, 5)
+    self.addCleanup(finish_within, session)
     self.addCleanup(session.close, "fim do teste")
     return session, peer, closes
 

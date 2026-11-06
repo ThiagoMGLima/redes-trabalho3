@@ -1,6 +1,7 @@
 """Interrupções de um download ativo: Sair, perda de conexão, prazo e
 encerramento do servidor, observados pela fronteira TCP."""
 import hashlib
+import importlib.util
 import os
 import signal
 import socket
@@ -14,7 +15,8 @@ import unittest
 import protocol as p
 from server import Server
 from tests.support import (
-  LogRecorder, OutputReader, ThreadErrors, free_port, install_programs, receive_within, wait_until,
+  LogRecorder, OutputReader, ScriptedServerTestCase, ThreadErrors, free_port, install_programs, receive_within,
+  shut_down_within, wait_until,
 )
 from tests.test_download import CONCLUDED, files_under, share
 from tests.test_server import address_of
@@ -170,7 +172,7 @@ class RelayedDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, **server_options)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
     self.relay = Relay(self, self.server.address)
     self.client = subprocess.Popen(
       [sys.executable, "-u", os.path.join(program, "client.py"), *map(str, self.relay.address)],
@@ -262,48 +264,7 @@ class RelayedDownloadTest(unittest.TestCase):
     self.assertNotIn("Traceback", self.output.text)
 
 
-class ScriptedServerInterruptionTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
-  teste faz o papel do servidor na conexão TCP local, decidindo o que é
-  enviado e quando a conexão termina."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    program = install_programs(os.path.join(base.name, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def downloaded(self, path):
-    return os.path.join(self.downloads_root, *path.split("/"))
-
-  def request(self, path):
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
-
-  def send(self, msg_type, content):
-    self.server_side.sendall(p.encode(msg_type, content))
+class ScriptedServerInterruptionTest(ScriptedServerTestCase):
 
   def start_transfer(self, path, size=3 * p.CHUNK_SIZE):
     """Pede `path`, envia FILE_META e um bloco e espera o bloco chegar ao
@@ -327,11 +288,12 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.assertEqual(self.client.wait(5), 0)
     self.assertNotIn("Traceback", self.output.text)
 
-  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0):
-    """Um download é concluído e outro está em andamento quando a conexão
+  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0, connection_open=False):
+    """Um download é concluído e outro está em andamento quando a sessão
     termina: a desconexão aparece em até `timeout` segundos sem que se
     pressione Enter, o temporário some, nada mais é anunciado como concluído
-    e o primeiro permanece."""
+    e o primeiro permanece. Com `connection_open`, o servidor não encerrou a
+    conexão, e o cliente a encerra sem esperar Enter."""
     self.request("pronto.txt")
     self.send(p.FILE_META, {"size": 6})
     self.send(p.FILE_DATA, b"pronto")
@@ -347,7 +309,25 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.assertEqual(files_under(self.downloads_root), ["pronto.txt"])
     with open(self.downloaded("pronto.txt"), "rb") as file:
       self.assertEqual(file.read(), b"pronto")
+    if connection_open:
+      self.assertConnectionEndedByTheClient()
     self.assertExitsAfterEnter()
+
+  def test_sair_with_a_request_still_pending_interrupts_the_download(self):
+    """O pedido chegou ao servidor, mas o FILE_META ainda não voltou: Sair
+    envia QUIT e o download pendente é marcado como interrompido, sem nada
+    no destino."""
+    self.request("aulas/pendente.bin")
+
+    self.type_line("1")
+
+    self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
+    self.output.wait_for("Download de aulas/pendente.bin interrompido")
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertNotIn("Desconectado do servidor", self.output.text)
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertNotIn("Traceback", self.output.text)
 
   def test_connection_closed_between_frames_before_file_end(self):
     self.assertDisconnectionDiscardsOnlyTheActiveDownload(self.server_side.close)
@@ -366,9 +346,10 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
 
   def test_receive_deadline_expiring_in_the_middle_of_a_block(self):
     """Um bloco começa a chegar e para, sem que a conexão termine: o prazo
-    de recepção do cliente expira e a sessão acaba como numa desconexão."""
+    de recepção do cliente expira, o cliente encerra a conexão e a sessão
+    acaba como numa desconexão."""
     stall = lambda: self.server_side.sendall(p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE))[:100])
-    self.assertDisconnectionDiscardsOnlyTheActiveDownload(stall, timeout=p.RECEIVE_TIMEOUT + 5)
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(stall, timeout=p.RECEIVE_TIMEOUT + 5, connection_open=True)
 
   @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
   def test_failure_to_remove_the_temporary_after_a_disconnection_is_reported(self):
@@ -400,6 +381,45 @@ class ScriptedServerInterruptionTest(unittest.TestCase):
     self.type_line("1")
     self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
     self.assertExitsAfterEnter()
+
+
+# Inicia o comando seguinte com um limite para o tamanho dos arquivos
+# gravados, como num disco cheio: acima dele, a gravação falha com EFBIG em
+# vez de encerrar o processo com SIGXFSZ.
+LIMITED_FILE_SIZE = (
+  "import os, resource, signal, sys; signal.signal(signal.SIGXFSZ, signal.SIG_IGN); "
+  "resource.setrlimit(resource.RLIMIT_FSIZE, (int(sys.argv[1]), int(sys.argv[1]))); os.execv(sys.argv[2], sys.argv[2:])"
+)
+
+
+@unittest.skipUnless(importlib.util.find_spec("resource") and hasattr(signal, "SIGXFSZ"), "requer RLIMIT_FSIZE")
+class LocalWriteFailureTest(ScriptedServerTestCase):
+  """O cliente não consegue gravar arquivos de mais de 10.000 bytes, e o
+  teste faz o papel do servidor."""
+
+  def client_command(self, command):
+    return [sys.executable, "-c", LIMITED_FILE_SIZE, "10000", *command]
+
+  def test_local_write_failure_ends_the_session_reporting_it_and_removing_the_temporary(self):
+    """A Q7 da #5 não definiu política própria para a falha de gravação
+    local, e a sessão termina, como antes. O fim é o de qualquer sessão: a
+    falha e a interrupção do download são informadas, o temporário é
+    removido, a desconexão aparece e a conexão é encerrada sem esperar
+    Enter."""
+    self.request("aulas/grande.bin")
+
+    self.server_side.sendall(p.encode(p.FILE_META, {"size": 2 * p.CHUNK_SIZE})
+                             + p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE)) * 2)
+
+    self.output.wait_for("Desconectado do servidor")
+    self.assertIn("Falha local ao gravar o download de aulas/grande.bin", self.output.text)
+    self.assertIn("Download de aulas/grande.bin interrompido", self.output.text)
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertConnectionEndedByTheClient()
+    self.client.stdin.close()
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn("Traceback", self.output.text)
 
 
 def stalled_download(test, address, path, wait_connected):
@@ -446,7 +466,7 @@ class ServerInterruptionTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, send_timeout=60)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self):
     sock = socket.create_connection(self.server.address, timeout=5)

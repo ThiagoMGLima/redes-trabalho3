@@ -5,15 +5,15 @@ import json
 import os
 import select
 import socket
-import subprocess
-import sys
 import tempfile
 import unittest
 
 import protocol as p
 from server import Server
-from tests.support import (CAN_EXCHANGE, LogRecorder, OutputReader, Swapper, install_programs, receive_within,
-                           wait_until)
+from tests.support import (
+  CAN_EXCHANGE, CAN_WATCH, CreationWatcher, LogRecorder, ScriptedServerTestCase, Swapper, receive_within,
+  shut_down_within, wait_until,
+)
 from tests.test_download import CONCLUDED, files_under, share
 
 FORBIDDEN = "Caminho inválido ou proibido"
@@ -24,6 +24,33 @@ def request_frame(path):
   e permite levar ao servidor até um substituto isolado, como `\\udc80`."""
   payload = json.dumps({"path": path}).encode("ascii")
   return p.HEADER.pack(p.FILE_REQUEST, len(payload)) + payload
+
+
+# O maior caminho ASCII cujo FILE_REQUEST cabe no limite de conteúdo do frame.
+LONGEST_PATH = p.MAX_CONTENT - len(p.encode(p.FILE_REQUEST, {"path": ""})) + p.HEADER.size
+
+
+def filling_the_frame(prefix):
+  """Caminho permitido que começa com `prefix` e é completado com
+  componentes de até 201 caracteres até ter LONGEST_PATH caracteres."""
+  whole = (LONGEST_PATH - len(prefix) - 2) // 201
+  path = prefix + ("/" + "x" * 200) * whole
+  return path + "/" + "y" * (LONGEST_PATH - len(path) - 1)
+
+
+def folder_chain(root, levels):
+  """Cria sob `root` `levels` pastas de nome com 200 caracteres, uma dentro
+  da outra, cada uma a partir do descritor da anterior, porque o caminho
+  completo passa do limite do sistema. Devolve o caminho relativo da última
+  e seu descritor, que o chamador fecha."""
+  name = "d" * 200
+  folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+  for _ in range(levels):
+    os.mkdir(name, dir_fd=folder)
+    inner = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=folder)
+    os.close(folder)
+    folder = inner
+  return "/".join([name] * levels), folder
 
 
 class ContainmentTest(unittest.TestCase):
@@ -75,7 +102,7 @@ class SharedRootTest(unittest.TestCase):
   def start_server(self, shared_root=None):
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=shared_root or self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self):
     sock = socket.create_connection(self.server.address, timeout=5)
@@ -109,7 +136,7 @@ class SharedRootTest(unittest.TestCase):
       client.sendall(request_frame(path))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, (path, error))
-      self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code), path)
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.FILE_REQUEST], code), path)
       self.assertTrue(error.content["message"])
     client.sendall(p.encode(p.FILE_REQUEST, {"path": present}))
 
@@ -240,6 +267,47 @@ class SharedRootTest(unittest.TestCase):
     self.assertNotIn(b"FORA DA RAIZ", served)
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_refusal_of_a_path_whose_request_fills_the_frame_keeps_the_session_open(self):
+    """Pedidos permitidos cujo FILE_REQUEST ocupa o limite do frame recebem
+    a recusa normal, que também cabe em um frame, e a sessão continua."""
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession(
+      [filling_the_frame("ausente"), filling_the_frame("presente.txt")], p.NOT_FOUND)
+
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_access_error_for_a_path_whose_request_fills_the_frame_keeps_the_session_open(self):
+    """Uma pasta sem permissão no começo do caminho e um arquivo sem
+    permissão de leitura no fim de uma cadeia de pastas tão longa que o
+    pedido ocupa o limite do frame."""
+    os.mkdir(self.shared("trancada"), 0)
+    self.addCleanup(os.chmod, self.shared("trancada"), 0o700)
+    chain, folder = folder_chain(self.shared_root, 325)
+    self.addCleanup(os.close, folder)
+    last = LONGEST_PATH - len(chain) - 1
+    os.close(os.open("f" * last, os.O_WRONLY | os.O_CREAT, 0, dir_fd=folder))
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession([filling_the_frame("trancada"), f"{chain}/{'f' * last}"], p.ACCESS_ERROR)
+
+  def test_refusals_deep_inside_the_root_for_paths_whose_request_fills_the_frame_keep_the_session_open(self):
+    """O arquivo ausente, a pasta, o link para arquivo e o link usado como
+    pasta ficam no fim de uma cadeia de pastas tão longa que o pedido ocupa
+    o limite do frame; a recusa repete o caminho ou a pasta e mesmo assim
+    cabe em um frame."""
+    chain, folder = folder_chain(self.shared_root, 325)
+    self.addCleanup(os.close, folder)
+    last = LONGEST_PATH - len(chain) - 1
+    os.mkdir("p" * last, dir_fd=folder)
+    os.symlink("nao-existe.txt", "l" * last, dir_fd=folder)
+    os.symlink(".", "a" * 180, dir_fd=folder)
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession([f"{chain}/{'z' * last}"], p.NOT_FOUND)
+    self.assertRefusedKeepingTheSession([f"{chain}/{'p' * last}"], p.NOT_REGULAR)
+    self.assertRefusedKeepingTheSession(
+      [f"{chain}/{'l' * last}", filling_the_frame(f"{chain}/{'a' * 180}")], p.PATH_FORBIDDEN)
+
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""
@@ -256,56 +324,21 @@ class SharedRootTest(unittest.TestCase):
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
 
-class DownloadsRootTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa cuja
-  raiz de downloads, `downloads/`, fica ao lado de uma pasta irmã de nome
-  parecido, `downloads-outro/`; o teste faz o papel do servidor na conexão
-  TCP local, controlando o que é enviado e quando."""
+class DownloadsRootTest(ScriptedServerTestCase):
+  """A raiz de downloads do cliente, `downloads/`, fica ao lado de uma pasta
+  irmã de nome parecido, `downloads-outro/`, e há uma pasta `fora/` fora
+  dela."""
 
   def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    self.base = base.name
-    program = install_programs(os.path.join(self.base, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-    self.sibling = os.path.join(program, "downloads-outro")
+    super().setUp()
+    self.sibling = os.path.join(os.path.dirname(self.downloads_root), "downloads-outro")
     os.mkdir(self.sibling)
     self.outside = os.path.join(self.base, "fora")
     os.mkdir(self.outside)
 
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.base,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def local(self, path):
-    return os.path.join(self.downloads_root, *path.split("/"))
-
   def link(self, path, target):
     """Cria em `downloads/` um link simbólico `path` que aponta para `target`."""
-    os.symlink(target, self.local(path))
-
-  def request(self, path):
-    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+    os.symlink(target, self.downloaded(path))
 
   def serve(self, content):
     self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
@@ -344,23 +377,36 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertTrue(wait_until(lambda: refusals() == len(paths)), self.output.text)
     self.serve(b"permitido")
     self.output.wait_for(CONCLUDED)
-    with open(self.local("permitido.txt"), "rb") as file:
+    with open(self.downloaded("permitido.txt"), "rb") as file:
       self.assertEqual(file.read(), b"permitido")
 
   def test_examples_forbidden_by_the_path_policy_are_refused_locally_without_sending_the_request(self):
     """Os exemplos proibidos da resolução da #3 que podem ser digitados numa
     linha, mesmo os que apontariam para algo existente na raiz de
     downloads, recebem a recusa local e nada é criado."""
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     forbidden = ["../../segredo.txt", "aulas/../resumo.pdf", "/etc/passwd", "C:/dados/a.txt", "C:\\dados\\a.txt",
                  "", "./arquivo", "aulas//resumo.pdf", "aulas/", "arquivo\x00", "arq\u2028uivo"]
 
     self.assertRefusedLocally(forbidden, FORBIDDEN)
     self.assertEqual(files_under(self.downloads_root), ["permitido.txt"])
-    self.assertEqual(os.listdir(self.local("aulas")), [])
+    self.assertEqual(os.listdir(self.downloaded("aulas")), [])
+
+  def test_path_whose_request_does_not_fit_in_a_frame_is_refused_locally_without_sending_it(self):
+    """Um caminho permitido cujo FILE_REQUEST ocupa exatamente o limite do
+    frame é pedido; com um caractere a mais, o pedido não cabe em um frame e
+    a recusa é local, sem enviar nada nem encerrar o cliente."""
+    fitting = filling_the_frame("aulas")
+    self.request(fitting)
+    self.send(p.ERROR, {"operation": p.TYPE_NAMES[p.FILE_REQUEST], "code": p.NOT_FOUND, "message": "Arquivo inexistente"})
+    self.output.wait_for(f"({p.NOT_FOUND})")
+
+    self.assertRefusedLocally([fitting + "y"], "Download recusado")
+    self.assertIn("excede o limite", self.output.text)
+    self.assertNotIn("Traceback", self.output.text)
 
   def test_symbolic_link_as_a_download_folder_is_refused_locally_without_sending_the_request(self):
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     self.link("interna", "aulas")
     self.link("aulas/externa", self.outside)
     self.link("irma", "../downloads-outro")
@@ -405,13 +451,13 @@ class DownloadsRootTest(unittest.TestCase):
     self.serve(b"outro")
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["outro.txt"])
-    self.assertEqual(os.readlink(self.local("aulas")), self.outside)
+    self.assertEqual(os.readlink(self.downloaded("aulas")), self.outside)
 
   def start_transfer(self, path, content):
     """Pede `path` e envia FILE_META e o primeiro bloco de `content`; volta
     quando o temporário já existe na pasta do destino. Devolve o envio do
     restante e do FILE_END."""
-    folder = os.path.dirname(self.local(path))
+    folder = os.path.dirname(self.downloaded(path))
     present = len(os.listdir(folder)) if os.path.isdir(folder) else 0
     self.request(path)
     self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
@@ -430,7 +476,7 @@ class DownloadsRootTest(unittest.TestCase):
     self.request("depois.txt")
     self.serve(b"depois")
     self.assertTrue(wait_until(lambda: self.output.text.count(CONCLUDED) > concluded), self.output.text)
-    with open(self.local("depois.txt"), "rb") as file:
+    with open(self.downloaded("depois.txt"), "rb") as file:
       self.assertEqual(file.read(), b"depois")
 
   def test_link_that_replaces_a_download_folder_during_the_transfer_fails_the_download_publishing_nothing(self):
@@ -440,18 +486,18 @@ class DownloadsRootTest(unittest.TestCase):
     o temporário é descartado e a sessão continua."""
     content = os.urandom(2 * p.CHUNK_SIZE)
     moves = [("aulas/externo.pdf", os.path.join(self.outside, "aulas")),
-             ("aulas/interno.pdf", self.local("aulas-real"))]
+             ("aulas/interno.pdf", self.downloaded("aulas-real"))]
     for path, moved in moves:
-      os.mkdir(self.local("aulas"))
+      os.mkdir(self.downloaded("aulas"))
       finish = self.start_transfer(path, content)
-      os.rename(self.local("aulas"), moved)
+      os.rename(self.downloaded("aulas"), moved)
       self.link("aulas", moved)
       finish()
       self.output.wait_for(f"Download de {path} falhou")
-      os.unlink(self.local("aulas"))
+      os.unlink(self.downloaded("aulas"))
 
     self.assertNotIn(CONCLUDED, self.output.text)
-    self.assertEqual(files_under(self.outside) + files_under(self.local("aulas-real")), [])
+    self.assertEqual(files_under(self.outside) + files_under(self.downloaded("aulas-real")), [])
     self.assertSessionContinues()
 
   def test_temporary_replaced_by_a_link_during_the_transfer_publishes_nothing(self):
@@ -463,17 +509,17 @@ class DownloadsRootTest(unittest.TestCase):
     personal = os.path.join(self.outside, "pessoal.txt")
     with open(personal, "wb") as file:
       file.write(b"CONTEUDO PESSOAL, NAO VERIFICADO")
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
-    [temporary] = os.listdir(self.local("aulas"))
-    os.symlink(personal, self.local("aulas/troca"))
-    os.replace(self.local("aulas/troca"), self.local(f"aulas/{temporary}"))
+    [temporary] = os.listdir(self.downloaded("aulas"))
+    os.symlink(personal, self.downloaded("aulas/troca"))
+    os.replace(self.downloaded("aulas/troca"), self.downloaded(f"aulas/{temporary}"))
 
     finish()
 
     self.output.wait_for("Download de aulas/resumo.pdf falhou")
     self.assertNotIn(CONCLUDED, self.output.text)
-    self.assertFalse(os.path.lexists(self.local("aulas/resumo.pdf")))
+    self.assertFalse(os.path.lexists(self.downloaded("aulas/resumo.pdf")))
     with open(personal, "rb") as file:
       self.assertEqual(file.read(), b"CONTEUDO PESSOAL, NAO VERIFICADO")
     self.assertEqual(os.stat(personal).st_nlink, 1)
@@ -491,17 +537,17 @@ class DownloadsRootTest(unittest.TestCase):
     """Com o temporário já criado e antes do FILE_END, alguém o remove. O
     download falha com o motivo, sem conclusão, deixa de estar ativo e a
     receptora continua."""
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
-    [temporary] = os.listdir(self.local("aulas"))
-    os.unlink(self.local(f"aulas/{temporary}"))
+    [temporary] = os.listdir(self.downloaded("aulas"))
+    os.unlink(self.downloaded(f"aulas/{temporary}"))
 
     finish()
 
     self.output.wait_for("Download de aulas/resumo.pdf falhou")
     self.assertNotIn(CONCLUDED, self.output.text)
     self.assertReceiverContinues()
-    self.assertEqual(os.listdir(self.local("aulas")), [])
+    self.assertEqual(os.listdir(self.downloaded("aulas")), [])
 
   @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
   def test_destination_folder_closed_for_writing_during_the_transfer_fails_the_download_and_ends_it(self):
@@ -509,18 +555,18 @@ class DownloadsRootTest(unittest.TestCase):
     deixa de aceitar escrita. A publicação falha com o motivo, sem
     conclusão; o temporário que não pôde ser removido é informado; o
     download deixa de estar ativo e a receptora continua."""
-    os.mkdir(self.local("aulas"))
-    self.addCleanup(os.chmod, self.local("aulas"), 0o700)
+    os.mkdir(self.downloaded("aulas"))
+    self.addCleanup(os.chmod, self.downloaded("aulas"), 0o700)
     finish = self.start_transfer("aulas/resumo.pdf", os.urandom(2 * p.CHUNK_SIZE))
-    [temporary] = os.listdir(self.local("aulas"))
-    os.chmod(self.local("aulas"), 0o500)
+    [temporary] = os.listdir(self.downloaded("aulas"))
+    os.chmod(self.downloaded("aulas"), 0o500)
 
     finish()
 
     self.output.wait_for("Download de aulas/resumo.pdf falhou")
-    self.output.wait_for(f"Não foi possível remover o arquivo temporário {self.local(f'aulas/{temporary}')}")
+    self.output.wait_for(f"Não foi possível remover o arquivo temporário {self.downloaded(f'aulas/{temporary}')}")
     self.assertNotIn(CONCLUDED, self.output.text)
-    self.assertFalse(os.path.lexists(self.local("aulas/resumo.pdf")))
+    self.assertFalse(os.path.lexists(self.downloaded("aulas/resumo.pdf")))
     self.assertReceiverContinues()
 
   @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
@@ -528,16 +574,16 @@ class DownloadsRootTest(unittest.TestCase):
     """Depois do pedido, a pasta do destino deixa de aceitar escrita: o
     temporário não pode ser criado, nada é gravado, o download falha ao
     receber FILE_END e a receptora continua."""
-    os.mkdir(self.local("aulas"))
-    self.addCleanup(os.chmod, self.local("aulas"), 0o700)
+    os.mkdir(self.downloaded("aulas"))
+    self.addCleanup(os.chmod, self.downloaded("aulas"), 0o700)
     self.request("aulas/resumo.pdf")
-    os.chmod(self.local("aulas"), 0o500)
+    os.chmod(self.downloaded("aulas"), 0o500)
 
     self.serve(b"conteudo")
 
     self.output.wait_for("Download de aulas/resumo.pdf falhou")
     self.assertNotIn(CONCLUDED, self.output.text)
-    self.assertEqual(os.listdir(self.local("aulas")), [])
+    self.assertEqual(os.listdir(self.downloaded("aulas")), [])
     self.assertReceiverContinues()
 
   @unittest.skipUnless(CAN_EXCHANGE, "requer renameat2 com RENAME_EXCHANGE")
@@ -548,9 +594,9 @@ class DownloadsRootTest(unittest.TestCase):
     pasta, nem temporário, nem arquivo publicado. O que foi anunciado como
     concluído está no destino, com o conteúdo verificado."""
     content = b"conteudo verificado"
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     self.link("troca", self.outside)
-    swapper = Swapper(self.local("aulas"), self.local("troca")).start()
+    swapper = Swapper(self.downloaded("aulas"), self.downloaded("troca")).start()
     try:
       outcomes = [self.try_download(f"aulas/2024/{number}.bin", content) for number in range(60)]
     finally:
@@ -559,24 +605,116 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertEqual(os.listdir(self.outside), [])
     for number, concluded in enumerate(outcomes):
       if concluded:
-        with open(self.local(f"aulas/2024/{number}.bin"), "rb") as file:
+        with open(self.downloaded(f"aulas/2024/{number}.bin"), "rb") as file:
           self.assertEqual(file.read(), content, number)
+
+  def result_line(self, path):
+    """Linha em que o cliente anunciou o resultado do download de `path`."""
+    [line] = [line for line in self.output.text.splitlines()
+              if line.startswith((f"Download de {path} falhou", f"{CONCLUDED}: {path} publicado"))]
+    return line
+
+  # Pasta do destino nos testes de corrida com a publicação: a conferência
+  # que segue a publicação percorre de novo toda a cadeia a partir da raiz,
+  # e uma cadeia longa dá tempo para a reação a vencer quase sempre.
+  DEEP = "/".join(["n"] * 40)
+
+  @unittest.skipUnless(CAN_WATCH, "requer inotify")
+  def test_object_saved_over_the_destination_right_after_publication_is_never_removed(self):
+    """Assim que o nome do destino aparece, outro programa salva nele o
+    próprio arquivo com o rename usual sobre o nome. Quando a conferência
+    que segue a publicação percebe a troca, o download falha sem anunciar
+    conclusão; quando a troca vem depois dela, o download é concluído, e a
+    troca é a limitação aceita de um processo local que substitui o arquivo
+    depois da conferência final. Nos dois casos, o arquivo do outro
+    programa fica no destino. A troca precisa vencer a conferência ao
+    menos uma vez na sequência."""
+    folder = self.downloaded(self.DEEP)
+    os.makedirs(folder)
+    saving = os.path.join(folder, ".salvando")
+    saved = b"VERSAO SALVA PELO OUTRO PROGRAMA"
+    target, saves = [None], []
+
+    def save_over(name):
+      if name == target[0]:
+        os.rename(saving, os.path.join(folder, name))
+        saves.append(name)
+
+    outcomes = []
+    with CreationWatcher(folder, save_over):
+      for number in range(20):
+        with open(saving, "wb") as file:
+          file.write(saved)
+        target[0] = f"{number}.bin"
+        outcomes.append(self.try_download(f"{self.DEEP}/{number}.bin", b"conteudo verificado"))
+        self.assertTrue(wait_until(lambda: len(saves) == number + 1), "o outro programa não salvou")
+        with open(os.path.join(folder, f"{number}.bin"), "rb") as file:
+          self.assertEqual(file.read(), saved, self.result_line(f"{self.DEEP}/{number}.bin"))
+
+    self.assertNotIn(None, outcomes)
+    self.assertIn(False, outcomes, "a troca nunca venceu a conferência que segue a publicação")
+    for number, concluded in enumerate(outcomes):
+      if not concluded:
+        self.assertIn("preservado", self.result_line(f"{self.DEEP}/{number}.bin"))
+
+  @unittest.skipUnless(CAN_WATCH, "requer inotify")
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_publication_that_cannot_be_undone_is_reported_without_claiming_nothing_was_published(self):
+    """Assim que o nome do destino aparece, sua pasta é movida para outro
+    nome e deixa de aceitar escrita. Quando isso vence a conferência que
+    segue a publicação, a conferência falha e a publicação não pode ser
+    desfeita: o cliente informa a falha sem dizer que nada foi publicado.
+    Quando a publicação pôde ser desfeita, nada fica na pasta movida. A
+    mudança precisa vencer a conferência ao menos uma vez na sequência."""
+    os.makedirs(self.downloaded(self.DEEP))
+    moves = []
+
+    def move_away(folder, moved):
+      def react(name):
+        if name == "resumo.bin":
+          os.rename(folder, moved)
+          os.chmod(moved, 0o500)
+          moves.append(moved)
+      return react
+
+    for number in range(20):
+      folder = self.downloaded(f"{self.DEEP}/aulas{number}")
+      moved = self.downloaded(f"{self.DEEP}/movida{number}")
+      os.mkdir(folder)
+      self.addCleanup(lambda moved=moved: os.path.isdir(moved) and os.chmod(moved, 0o700))
+      with CreationWatcher(folder, move_away(folder, moved)):
+        self.try_download(f"{self.DEEP}/aulas{number}/resumo.bin", b"conteudo verificado")
+        self.assertTrue(wait_until(lambda: moved in moves), "a pasta não foi movida")
+
+    not_undone = 0
+    for number in range(20):
+      line = self.result_line(f"{self.DEEP}/aulas{number}/resumo.bin")
+      remains = os.path.lexists(self.downloaded(f"{self.DEEP}/movida{number}/resumo.bin"))
+      if line.startswith(CONCLUDED):
+        self.assertTrue(remains, line)
+      elif remains:
+        not_undone += 1
+        self.assertNotIn("Nada foi publicado", line)
+        self.assertIn("não foi possível desfazer a publicação", line)
+      else:
+        self.assertIn("Nada foi publicado", line)
+    self.assertGreater(not_undone, 0, "a mudança da pasta nunca venceu a conferência que segue a publicação")
 
   def test_object_in_the_place_of_a_download_folder_is_preserved(self):
     """Antes do pedido, a recusa é local; depois dele, o download falha."""
-    with open(self.local("aulas"), "wb") as file:
+    with open(self.downloaded("aulas"), "wb") as file:
       file.write(b"arquivo, nao pasta")
 
     self.assertRefusedLocally(["aulas/resumo.pdf", "aulas/2024/resumo.pdf"], "já existe")
     self.request("notas/resumo.pdf")
-    with open(self.local("notas"), "wb") as file:
+    with open(self.downloaded("notas"), "wb") as file:
       file.write(b"surgiu depois do pedido")
     self.serve(b"conteudo")
 
     self.output.wait_for("Download de notas/resumo.pdf falhou")
     self.assertEqual(self.output.text.count(CONCLUDED), 1)
     for name, content in [("aulas", b"arquivo, nao pasta"), ("notas", b"surgiu depois do pedido")]:
-      with open(self.local(name), "rb") as file:
+      with open(self.downloaded(name), "rb") as file:
         self.assertEqual(file.read(), content)
     self.assertEqual(files_under(self.downloads_root), ["aulas", "notas", "permitido.txt"])
 
@@ -588,24 +726,24 @@ class DownloadsRootTest(unittest.TestCase):
     creations = [("aulas/arquivo.txt", create_file), ("aulas/pasta.txt", os.mkdir),
                  ("aulas/link.txt", lambda destination: os.symlink(self.outside, destination))]
     content = os.urandom(2 * p.CHUNK_SIZE)
-    os.mkdir(self.local("aulas"))
+    os.mkdir(self.downloaded("aulas"))
     for path, create in creations:
-      present = len(os.listdir(self.local("aulas")))
+      present = len(os.listdir(self.downloaded("aulas")))
       self.request(path)
       self.server_side.sendall(p.encode(p.FILE_META, {"size": len(content)}))
       self.server_side.sendall(p.encode(p.FILE_DATA, content[:p.CHUNK_SIZE]))
-      self.assertTrue(wait_until(lambda: len(os.listdir(self.local("aulas"))) > present), "temporário não criado")
-      create(self.local(path))
+      self.assertTrue(wait_until(lambda: len(os.listdir(self.downloaded("aulas"))) > present), "temporário não criado")
+      create(self.downloaded(path))
       self.server_side.sendall(p.encode(p.FILE_DATA, content[p.CHUNK_SIZE:]))
       self.server_side.sendall(p.encode(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()}))
       self.output.wait_for(f"Download de {path} falhou")
 
     self.assertNotIn(CONCLUDED, self.output.text)
-    with open(self.local("aulas/arquivo.txt"), "rb") as file:
+    with open(self.downloaded("aulas/arquivo.txt"), "rb") as file:
       self.assertEqual(file.read(), b"criado durante")
-    self.assertEqual(os.listdir(self.local("aulas/pasta.txt")), [])
-    self.assertEqual(os.readlink(self.local("aulas/link.txt")), self.outside)
-    self.assertEqual(sorted(os.listdir(self.local("aulas"))), ["arquivo.txt", "link.txt", "pasta.txt"])
+    self.assertEqual(os.listdir(self.downloaded("aulas/pasta.txt")), [])
+    self.assertEqual(os.readlink(self.downloaded("aulas/link.txt")), self.outside)
+    self.assertEqual(sorted(os.listdir(self.downloaded("aulas"))), ["arquivo.txt", "link.txt", "pasta.txt"])
     self.assertEqual(files_under(self.outside), [])
 
   def test_destination_follows_only_the_requested_path_whatever_the_server_sends(self):
@@ -620,7 +758,7 @@ class DownloadsRootTest(unittest.TestCase):
 
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["aulas/resumo.pdf"])
-    with open(self.local("aulas/resumo.pdf"), "rb") as file:
+    with open(self.downloaded("aulas/resumo.pdf"), "rb") as file:
       self.assertEqual(file.read(), content)
     self.assertEqual(files_under(self.outside) + files_under(self.sibling), [])
 
@@ -629,12 +767,12 @@ class DownloadsRootTest(unittest.TestCase):
     """Antes do pedido, a recusa é local; se a permissão faltar depois dele,
     o download falha ao criar a subpasta."""
     for folder in ("trancada", "somente-leitura"):
-      os.mkdir(self.local(folder))
-      self.addCleanup(os.chmod, self.local(folder), 0o700)
-    os.chmod(self.local("trancada"), 0)
+      os.mkdir(self.downloaded(folder))
+      self.addCleanup(os.chmod, self.downloaded(folder), 0o700)
+    os.chmod(self.downloaded("trancada"), 0)
 
     self.request("somente-leitura/sub/resumo.pdf")
-    os.chmod(self.local("somente-leitura"), 0o500)
+    os.chmod(self.downloaded("somente-leitura"), 0o500)
     self.serve(b"conteudo")
     self.output.wait_for("Download de somente-leitura/sub/resumo.pdf falhou")
 
@@ -643,15 +781,15 @@ class DownloadsRootTest(unittest.TestCase):
     self.assertNotIn("Traceback", self.output.text)
 
   def test_symbolic_link_at_the_destination_is_forbidden_and_preserved(self):
-    with open(self.local("meu.txt"), "wb") as file:
+    with open(self.downloaded("meu.txt"), "wb") as file:
       file.write(b"meu")
     self.link("interno.txt", "meu.txt")
     self.link("quebrado.txt", "nao-existe.txt")
     self.link("externo.txt", os.path.join(self.outside, "novo.txt"))
 
     self.assertRefusedLocally(["interno.txt", "quebrado.txt", "externo.txt"], FORBIDDEN)
-    self.assertEqual(os.readlink(self.local("interno.txt")), "meu.txt")
-    self.assertEqual(os.readlink(self.local("quebrado.txt")), "nao-existe.txt")
+    self.assertEqual(os.readlink(self.downloaded("interno.txt")), "meu.txt")
+    self.assertEqual(os.readlink(self.downloaded("quebrado.txt")), "nao-existe.txt")
     self.assertEqual(files_under(self.outside), [])
 
 

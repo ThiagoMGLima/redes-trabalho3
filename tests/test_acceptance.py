@@ -16,7 +16,7 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, install_programs, wait_until
+from tests.support import LogRecorder, OutputReader, install_programs, shut_down_within, wait_until
 from tests.test_download import CONCLUDED, EMPTY_SHA256, SIZE_12_MIB, files_under, sha256_of, share
 from tests.test_interruptions import Relay, whole_frames
 
@@ -81,7 +81,7 @@ class TerminalAcceptanceTest(unittest.TestCase):
     # enquanto o teste o mantém parado.
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root, send_timeout=60)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def start_client(self, name):
     client = TerminalClient(self, os.path.join(self.base, name), self.server.address)
@@ -136,7 +136,7 @@ class TerminalAcceptanceTest(unittest.TestCase):
     """Cada cliente já concluiu um download e tem outro parado no meio quando
     o servidor é encerrado. O encerramento não espera as transferências, e
     cada cliente exibe a desconexão sem que se pressione Enter, interrompe o
-    download ativo sem anunciá-lo, descarta o temporário e mantém o arquivo
+    download ativo sem anunciá-lo, descarta o temporário e mantém o download
     concluído."""
     share(self.shared_root, "pronto.txt", b"pronto")
     share(self.shared_root, "grande.bin", os.urandom(SIZE_12_MIB))

@@ -6,7 +6,7 @@ import unittest
 
 import protocol as p
 from server import Session
-from tests.support import ThreadErrors, receive_within, tcp_pair, wait_until
+from tests.support import ThreadErrors, finish_within, receive_within, tcp_pair, wait_until
 from tests.test_server import ServerTestCase, address_of
 
 
@@ -145,7 +145,7 @@ class OutgoingQueueTest(unittest.TestCase):
     session = Session(near, "lento", send_timeout=30, receive_timeout=30,
                       on_close=lambda session, reason: closes.append(reason))
     session.start()
-    self.addCleanup(session.join, 5)
+    self.addCleanup(finish_within, session)
     self.addCleanup(session.close, "fim do teste")
     return session, peer, closes
 

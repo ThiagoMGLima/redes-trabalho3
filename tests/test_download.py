@@ -8,7 +8,10 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, free_port, install_programs, receive_within, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ScriptedServerTestCase, free_port, install_programs, receive_within,
+  shut_down_within, wait_until,
+)
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 SIZE_12_MIB = 12_582_912
@@ -53,7 +56,7 @@ class ServerDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
 
   def connect(self, small_receive_buffer=False):
     """Com buffer de recepção pequeno, o servidor só avança alguns blocos
@@ -100,7 +103,7 @@ class ServerDownloadTest(unittest.TestCase):
       client.sendall(p.encode(p.FILE_REQUEST, content))
       error = receive_within(client)
       self.assertEqual(error.type, p.ERROR, error)
-      self.assertEqual((error.content["operation"], error.content["code"]), ("FILE_REQUEST", code))
+      self.assertEqual((error.content["operation"], error.content["code"]), (p.TYPE_NAMES[p.FILE_REQUEST], code))
       self.assertTrue(error.content["message"])
     self.request(client, "presente.txt")
 
@@ -109,12 +112,12 @@ class ServerDownloadTest(unittest.TestCase):
 
   def test_missing_file_gets_not_found_and_the_session_keeps_accepting_operations(self):
     missing = ["ausente.txt", "pasta/ausente.txt", "presente.txt/dentro.txt"]
-    self.assertRefusedKeepingTheSession([{"path": path} for path in missing], "NOT_FOUND")
+    self.assertRefusedKeepingTheSession([{"path": path} for path in missing], p.NOT_FOUND)
 
   def test_valid_json_with_missing_or_invalid_fields_gets_invalid_request(self):
     contents = [{}, {"caminho": "presente.txt"}, {"path": None}, {"path": 7}, {"path": ["presente.txt"]},
                 ["presente.txt"], "presente.txt", None]
-    self.assertRefusedKeepingTheSession(contents, "INVALID_REQUEST")
+    self.assertRefusedKeepingTheSession(contents, p.INVALID_REQUEST)
 
   def test_forbidden_path_syntax_gets_path_forbidden_even_when_the_target_exists(self):
     with open(os.path.join(self.outside_root, "fora.txt"), "wb") as file:
@@ -126,7 +129,7 @@ class ServerDownloadTest(unittest.TestCase):
       os.path.join(self.outside_root, "fora.txt"), "C:/dados/a.txt", "C:\\dados\\a.txt", "aulas\\resumo.pdf",
       "aulas/resumo.pdf\x00", "nome\nquebrado", "tab\tulado", "escape\x1b",
     ]
-    self.assertRefusedKeepingTheSession([{"path": path} for path in forbidden], "PATH_FORBIDDEN")
+    self.assertRefusedKeepingTheSession([{"path": path} for path in forbidden], p.PATH_FORBIDDEN)
 
   def test_file_is_sent_as_meta_8_kib_blocks_and_end_with_its_sha256(self):
     content = os.urandom(2 * 8192 + 3616)
@@ -219,7 +222,7 @@ class ClientDownloadTest(unittest.TestCase):
     self.log = LogRecorder()
     self.server = Server("127.0.0.1", 0, log=self.log, shared_root=self.shared_root)
     self.server.start()
-    self.addCleanup(self.server.shutdown)
+    self.addCleanup(shut_down_within, self.server)
     self.client = subprocess.Popen(
       [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(self.server.address[1])],
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.working_dir,
@@ -308,49 +311,7 @@ class ClientDownloadTest(unittest.TestCase):
 
 
 
-class ScriptedServerDownloadTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
-  teste faz o papel do servidor na conexão TCP local, controlando o que é
-  enviado e quando."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    program = install_programs(os.path.join(base.name, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def downloaded(self, path):
-    return os.path.join(self.downloads_root, *path.split("/"))
-
-  def request(self, path):
-    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
-
-  def send(self, msg_type, content):
-    self.server_side.sendall(p.encode(msg_type, content))
+class ScriptedServerDownloadTest(ScriptedServerTestCase):
 
   def serve(self, size, blocks, sha256):
     self.send(p.FILE_META, {"size": size})
@@ -431,6 +392,43 @@ class ScriptedServerDownloadTest(unittest.TestCase):
     self.serve(3, [b"abc"], abc)
     self.output.wait_for(CONCLUDED)
     self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
+
+  def assertSessionContinuesWithoutLeftovers(self):
+    """Nada foi publicado nem ficou temporário; a receptora segue exibindo
+    o chat e o download seguinte é concluído."""
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.send(p.CHAT, {"origin": "Servidor", "text": "a sessão continua"})
+    self.output.wait_for("[Servidor] a sessão continua")
+    abc = hashlib.sha256(b"abc").hexdigest()
+    self.request("certo.bin")
+    self.serve(3, [b"abc"], abc)
+    self.output.wait_for(CONCLUDED)
+    self.assertEqual(files_under(self.downloads_root), ["certo.bin"])
+    self.assertNotIn("Traceback", self.output.text)
+
+  def test_file_data_or_file_end_before_file_meta_fails_the_download(self):
+    """Sem FILE_META antes dos blocos, o tamanho não foi anunciado e o
+    download não pode ser verificado: ele falha ao receber FILE_END."""
+    abc = hashlib.sha256(b"abc").hexdigest()
+    self.request("dados-antes.bin")
+    self.send(p.FILE_DATA, b"abc")
+    self.serve(3, [b"abc"], abc)
+    self.output.wait_for("Download de dados-antes.bin falhou")
+
+    self.request("fim-antes.bin")
+    self.send(p.FILE_END, {"sha256": EMPTY_SHA256})
+    self.output.wait_for("Download de fim-antes.bin falhou")
+
+    self.assertSessionContinuesWithoutLeftovers()
+
+  def test_repeated_file_meta_fails_the_download_without_leaving_a_temporary(self):
+    self.request("repetido.bin")
+    self.send(p.FILE_META, {"size": 3})
+    self.serve(3, [b"abc"], hashlib.sha256(b"abc").hexdigest())
+
+    self.output.wait_for("Download de repetido.bin falhou")
+    self.assertSessionContinuesWithoutLeftovers()
 
 
 

@@ -13,7 +13,6 @@ import threading
 import protocol as p
 
 HOST = ""
-PORT = 50007
 SERVER_ORIGIN = "Servidor"
 SHARED_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
 MAX_CLIENTS = 10
@@ -22,16 +21,6 @@ MAX_PENDING = 64
 
 def terminal_log(line):
   print(line, flush=True)
-
-
-def parse_port(text):
-  try:
-    port = int(text)
-  except ValueError:
-    raise argparse.ArgumentTypeError("a porta deve ser um número")
-  if not 1024 < port <= 65535:
-    raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
-  return port
 
 
 class FileRefused(Exception):
@@ -64,42 +53,50 @@ def open_shared_file(root, path):
   except p.ForbiddenPath as error:
     raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
   parts = path.split("/")
-  folder = _open_folder(root, None, "a raiz compartilhada", path)
+  shown = _shown(path)
+  folder = _open_folder(root, None, "a raiz compartilhada", shown)
   try:
     for depth, part in enumerate(parts[:-1], start=1):
-      inner = _open_folder(part, folder, "/".join(parts[:depth]), path)
+      inner = _open_folder(part, folder, _shown("/".join(parts[:depth])), shown)
       os.close(folder)
       folder = inner
     try:
       mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode
     except OSError as error:
-      raise _refusal_for(error, path) from None
+      raise _refusal_for(error, shown) from None
     if stat.S_ISLNK(mode):
-      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
     if not stat.S_ISREG(mode):
-      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {shown}")
     try:
       p.check_inside(root, os.path.join(root, *parts))
     except p.ForbiddenPath as error:
       raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
-    return _open_regular(parts[-1], folder, path)
+    return _open_regular(parts[-1], folder, shown)
   finally:
     os.close(folder)
 
 
-# Uma pasta é aberta sem seguir links; O_PATH, onde existe, dispensa a
-# permissão de leitura, como o exame por nome.
-_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
+# Uma recusa repete o caminho pedido. Um caminho longo aparece encurtado no
+# meio, para que o ERROR caiba no limite do frame qualquer que seja o pedido.
+SHOWN_PATH_LIMIT = 200
+
+
+def _shown(path):
+  if len(path) <= SHOWN_PATH_LIMIT:
+    return path
+  half = SHOWN_PATH_LIMIT // 2
+  return f"{path[:half]}…{path[-half:]}"
 
 
 def _open_folder(name, parent, shown, path):
   """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
   completo, sem `parent`), aberta sem seguir links. Uma falha é
   classificada pelo que está no lugar: link é PATH_FORBIDDEN, algo que não
-  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. `shown` nomeia a
-  pasta na recusa."""
+  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. Na recusa, `shown`
+  nomeia a pasta e `path`, o caminho pedido, ambos já encurtados."""
   try:
-    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+    return os.open(name, p.FOLDER_FLAGS, dir_fd=parent)
   except OSError as error:
     failure = error
   try:
@@ -116,7 +113,7 @@ def _open_folder(name, parent, shown, path):
 # Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
 # lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
 # a leitura.
-_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 def _open_regular(name, folder, path):
@@ -174,7 +171,8 @@ class FileTransfer:
 
 
 class Session:
-  """Atendimento de uma conexão aceita.
+  """Atendimento de uma conexão aceita, cujo participante tem o
+  identificador do cliente `client_id`, atribuído pelo servidor.
 
   A thread de atendimento é a única leitora do socket e a auxiliar escritora
   é a única que escreve nele; as demais threads entregam mensagens pela fila
@@ -188,10 +186,10 @@ class Session:
 
   _STOP = object()
 
-  def __init__(self, sock, name, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+  def __init__(self, sock, client_id, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
                on_message=None, on_close=None):
     self.sock = sock
-    self.name = name
+    self.client_id = client_id
     self._send_timeout = send_timeout
     self._receive_timeout = receive_timeout
     self._on_message = on_message
@@ -200,8 +198,8 @@ class Session:
     self._closed = False
     self._download_active = False
     self._outgoing = queue.Queue(MAX_PENDING)
-    self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
-    self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
+    self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {client_id}")
+    self._writer = threading.Thread(target=self._write_loop, name=f"escritora {client_id}")
 
   def start(self):
     self._writer.start()
@@ -292,7 +290,7 @@ class Session:
         return f"falha na conexão: {error}"
       if message is None:
         return "conexão encerrada pelo cliente"
-      if message.type == p.QUIT:
+      if message.type == p.QUIT and message.content == {}:
         return "QUIT"
       if self._on_message is not None:
         self._on_message(self, message)
@@ -347,7 +345,7 @@ class Session:
 
 
 class Server:
-  def __init__(self, host=HOST, port=PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
+  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, send_timeout=p.SEND_TIMEOUT, receive_timeout=p.RECEIVE_TIMEOUT,
                log=terminal_log, shared_root=SHARED_ROOT):
     self._host = host
     self._port = port
@@ -444,7 +442,7 @@ class Server:
   def _end_session(self, session, reason):
     with self._lock:
       address = self._sessions.pop(session)
-    self._log(f"Desconectado: {address} como {session.name} ({reason})")
+    self._log(f"Desconectado: {address} como {session.client_id} ({reason})")
 
   def _handle_message(self, session, message):
     if message.type == p.CHAT:
@@ -453,43 +451,47 @@ class Server:
     if message.type == p.FILE_REQUEST:
       self._receive_file_request(session, message.content)
       return
-    self._log(f"{p.TYPE_NAMES[message.type]} de {session.name} ignorado: ainda não suportado")
+    if message.type == p.QUIT:
+      self._refuse(session, p.QUIT, p.INVALID_REQUEST, "QUIT exige um objeto vazio")
+      return
+    self._log(f"{p.TYPE_NAMES[message.type]} de {session.client_id} ignorado: só o servidor envia essa mensagem")
 
   def _receive_chat(self, session, content):
     text = content.get("text") if isinstance(content, dict) else None
     if not isinstance(text, str):
-      self._refuse(session, "CHAT", p.INVALID_REQUEST, "CHAT exige um objeto com o campo text do tipo string")
+      self._refuse(session, p.CHAT, p.INVALID_REQUEST, "CHAT exige um objeto com o campo text do tipo string")
       return
     try:
       p.check_chat_text(text)
     except p.InvalidChatText as error:
-      self._refuse(session, "CHAT", p.INVALID_CHAT, str(error))
+      self._refuse(session, p.CHAT, p.INVALID_CHAT, str(error))
       return
-    self._deliver(session.name, text, skip=session)
+    self._deliver(session.client_id, text, skip=session)
 
   def _receive_file_request(self, session, content):
     """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
     escritora da sessão, que o envia bloco a bloco. Enquanto a sessão tem um
     download ativo, todo pedido recebe BUSY e o envio atual prossegue."""
     if session.download_active:
-      self._refuse(session, "FILE_REQUEST", p.BUSY, "Já existe um download ativo nesta sessão")
+      self._refuse(session, p.FILE_REQUEST, p.BUSY, "Já existe um download ativo nesta sessão")
       return
     path = content.get("path") if isinstance(content, dict) else None
     if not isinstance(path, str):
       self._refuse(
-        session, "FILE_REQUEST", p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
+        session, p.FILE_REQUEST, p.INVALID_REQUEST, "FILE_REQUEST exige um objeto com o campo path do tipo string"
       )
       return
     try:
       file = open_shared_file(self._shared_root, path)
     except FileRefused as refusal:
-      self._refuse(session, "FILE_REQUEST", refusal.code, str(refusal))
+      self._refuse(session, p.FILE_REQUEST, refusal.code, str(refusal))
       return
     session.send_file(file)
 
   def _refuse(self, session, operation, code, message):
-    """Recusa normal: o ERROR segue pela fila da sessão, que continua aberta."""
-    session.send(p.ERROR, {"operation": operation, "code": code, "message": message})
+    """Recusa normal da mensagem do tipo `operation`: o ERROR segue pela
+    fila da sessão, que continua aberta."""
+    session.send(p.ERROR, {"operation": p.TYPE_NAMES[operation], "code": code, "message": message})
 
   def _deliver(self, origin, text, skip=None):
     """Exibe no terminal e enfileira para os clientes conectados, exceto
@@ -518,8 +520,12 @@ def read_operator_input(server):
 
 def main():
   parser = argparse.ArgumentParser(description="Servidor TCP de chat coletivo e transferência de arquivos")
-  parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
+  parser.add_argument("port", nargs="?", type=p.parse_port, default=p.DEFAULT_PORT,
+                      help=f"porta TCP (padrão {p.DEFAULT_PORT})")
   args = parser.parse_args()
+  # Bytes digitados que não formam UTF-8 viram substitutos isolados, que
+  # p.check_chat_text recusa, em vez de interromper input() com exceção.
+  sys.stdin.reconfigure(errors="surrogateescape")
 
   server = Server(HOST, args.port)
   try:
@@ -527,9 +533,11 @@ def main():
   except OSError as error:
     terminal_log(f"Não foi possível escutar na porta TCP {args.port}: {error}")
     sys.exit(1)
-  terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
-  terminal_log("Digite uma mensagem e Enter para enviá-la a todos os clientes. Ctrl+C ou EOF encerra.")
+  # Com o servidor já aceitando conexões, um Ctrl+C a qualquer momento,
+  # inclusive durante as mensagens iniciais, precisa encerrá-lo.
   try:
+    terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
+    terminal_log("Digite uma mensagem e Enter para enviá-la a todos os clientes. Ctrl+C ou EOF encerra.")
     read_operator_input(server)
   except KeyboardInterrupt:
     terminal_log("Ctrl+C recebido: encerrando o servidor")

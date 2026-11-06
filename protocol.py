@@ -5,6 +5,7 @@ comprimento do conteúdo em 4 bytes sem sinal, em ordem de rede) seguido do
 conteúdo. Controles são objetos JSON em UTF-8; FILE_DATA leva os bytes
 originais do arquivo. O comprimento conta bytes já codificados.
 """
+import argparse
 import json
 import os
 import select
@@ -32,6 +33,8 @@ TYPE_NAMES = {
   ERROR: "ERROR",
 }
 
+DEFAULT_PORT = 50007
+
 HEADER = struct.Struct("!BI")
 MAX_CONTENT = 64 * 1024
 CHUNK_SIZE = 8 * 1024
@@ -50,6 +53,11 @@ INVALID_REQUEST = "INVALID_REQUEST"
 BUSY = "BUSY"
 
 Message = namedtuple("Message", "type content")
+
+# Uma pasta é aberta sem seguir links, e o descritor obtido é o ponto de
+# partida da operação seguinte; o caminho não é resolvido de novo pelo nome.
+# O_PATH, onde existe, dispensa a permissão de leitura, como o exame por nome.
+FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
 
 
 class ProtocolError(Exception):
@@ -76,6 +84,17 @@ class ForbiddenPath(ValueError):
   """Caminho de arquivo com sintaxe proibida; a mensagem traz o motivo."""
 
 
+def parse_port(text):
+  """Porta TCP da linha de comando, de 1025 a 65535."""
+  try:
+    port = int(text)
+  except ValueError:
+    raise argparse.ArgumentTypeError("a porta deve ser um número")
+  if not 1024 < port <= 65535:
+    raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
+  return port
+
+
 def encode(msg_type, content):
   if msg_type not in TYPE_NAMES:
     raise ValueError(f"tipo desconhecido {msg_type}")
@@ -97,6 +116,13 @@ def decode(msg_type, payload):
     raise InvalidFrame(f"JSON inválido em {TYPE_NAMES[msg_type]}: {error}") from None
 
 
+def _breaks_the_line(text):
+  """Informa se `text` tem caractere de controle (inclusive tabulação,
+  quebra de linha, Escape e NUL) ou separador de linha ou de parágrafo do
+  Unicode."""
+  return any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in text)
+
+
 def check_chat_text(text):
   """Aceita de 1 a MAX_CHAT_BYTES bytes de texto UTF-8 em uma única linha,
   preservado como veio. Levanta InvalidChatText para texto vazio, somente
@@ -112,7 +138,7 @@ def check_chat_text(text):
     raise InvalidChatText("a mensagem contém somente espaços")
   if size > MAX_CHAT_BYTES:
     raise InvalidChatText(f"a mensagem tem {size} bytes; o limite é {MAX_CHAT_BYTES}")
-  if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in text):
+  if _breaks_the_line(text):
     raise InvalidChatText("a mensagem contém caracteres de controle ou quebra de linha")
 
 
@@ -134,7 +160,7 @@ def check_relative_path(path):
     raise ForbiddenPath("caminhos absolutos não são permitidos")
   if "\\" in path or ":" in path:
     raise ForbiddenPath("o caminho não pode conter barra invertida nem dois-pontos")
-  if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in path):
+  if _breaks_the_line(path):
     raise ForbiddenPath("o caminho contém caracteres de controle ou quebra de linha")
   if any(part in ("", ".", "..") for part in path.split("/")):
     raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
