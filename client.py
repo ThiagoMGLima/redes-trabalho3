@@ -137,8 +137,7 @@ def _create_temporary(folder):
   for _ in range(100):
     name = f".{secrets.token_hex(6)}.parcial"
     try:
-      return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600,
-                     dir_fd=folder), name
+      return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=folder), name
     except FileExistsError:
       continue
   raise FileExistsError(errno.EEXIST, "nenhum nome livre para o temporário")

@@ -113,7 +113,7 @@ def _open_folder(name, parent, shown, path):
 # Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
 # lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
 # a leitura.
-_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 def _open_regular(name, folder, path):
