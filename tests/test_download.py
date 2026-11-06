@@ -8,7 +8,9 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, free_port, install_programs, receive_within, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ScriptedServerTestCase, free_port, install_programs, receive_within, wait_until,
+)
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 SIZE_12_MIB = 12_582_912
@@ -308,49 +310,7 @@ class ClientDownloadTest(unittest.TestCase):
 
 
 
-class ScriptedServerDownloadTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
-  teste faz o papel do servidor na conexão TCP local, controlando o que é
-  enviado e quando."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    program = install_programs(os.path.join(base.name, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def downloaded(self, path):
-    return os.path.join(self.downloads_root, *path.split("/"))
-
-  def request(self, path):
-    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
-
-  def send(self, msg_type, content):
-    self.server_side.sendall(p.encode(msg_type, content))
+class ScriptedServerDownloadTest(ScriptedServerTestCase):
 
   def serve(self, size, blocks, sha256):
     self.send(p.FILE_META, {"size": size})

@@ -3,8 +3,12 @@ import os
 import select
 import shutil
 import socket
+import subprocess
+import sys
+import tempfile
 import threading
 import time
+import unittest
 
 import protocol as p
 
@@ -176,3 +180,50 @@ class OutputReader:
   def wait_for(self, text, timeout=5.0):
     if not wait_until(lambda: text in self.text, timeout):
       raise AssertionError(f"{text!r} não apareceu na saída: {self.text!r}")
+
+
+class ScriptedServerTestCase(unittest.TestCase):
+  """O cliente roda como no terminal, a partir de uma cópia do programa em
+  diretório temporário, e o teste faz o papel do servidor na conexão TCP
+  local, decidindo o que é enviado e quando a conexão termina."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.base = base.name
+    program = install_programs(os.path.join(self.base, "cliente"))
+    self.downloads_root = os.path.join(program, "downloads")
+    os.mkdir(self.downloads_root)
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    self.addCleanup(listener.close)
+    listener.settimeout(5)
+    self.client = subprocess.Popen(
+      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
+      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.base,
+      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    self.output = OutputReader(self.client.stdout)
+    self.addCleanup(self.output.close)
+    self.addCleanup(self.client.wait, 5)
+    self.addCleanup(self.client.kill)
+    self.addCleanup(self.client.stdin.close)
+    self.server_side, _ = listener.accept()
+    self.addCleanup(self.server_side.close)
+
+  def type_line(self, line):
+    self.client.stdin.write(line + "\n")
+    self.client.stdin.flush()
+
+  def downloaded(self, path):
+    """Destino local de `path` sob a raiz de downloads."""
+    return os.path.join(self.downloads_root, *path.split("/"))
+
+  def request(self, path):
+    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
+    self.type_line("2")
+    self.type_line(path)
+    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+
+  def send(self, msg_type, content):
+    self.server_side.sendall(p.encode(msg_type, content))

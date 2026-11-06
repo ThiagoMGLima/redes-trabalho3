@@ -8,14 +8,12 @@ depende de o arquivo terminar rápido ou devagar.
 import hashlib
 import os
 import socket
-import subprocess
-import sys
 import tempfile
 import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, install_programs, receive_within, wait_until
+from tests.support import LogRecorder, ScriptedServerTestCase, receive_within, wait_until
 from tests.test_download import CONCLUDED, SIZE_12_MIB, files_under, share
 
 ACTIVE_DOWNLOAD = "Já existe um download ativo"
@@ -153,46 +151,7 @@ class ServerConcurrencyTest(unittest.TestCase):
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
 
-class ScriptedServerClientTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
-  teste faz o papel do servidor na conexão TCP local, decidindo o que é
-  enviado e quando."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    program = install_programs(os.path.join(base.name, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def send(self, msg_type, content):
-    self.server_side.sendall(p.encode(msg_type, content))
-
-  def request(self, path):
-    """Escolhe Arquivo e informa o caminho; o pedido chega ao servidor."""
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
+class ScriptedServerClientTest(ScriptedServerTestCase):
 
   def chat(self, text):
     """Escolhe Chat e envia `text`; a mensagem chega ao servidor."""
@@ -204,7 +163,7 @@ class ScriptedServerClientTest(unittest.TestCase):
     """Espera o temporário do download ter `size` bytes gravados: a receptora
     já processou tudo o que foi enviado até ali."""
     def written():
-      return sum(os.path.getsize(os.path.join(self.downloads_root, path)) for path in files_under(self.downloads_root))
+      return sum(os.path.getsize(self.downloaded(path)) for path in files_under(self.downloads_root))
     if not wait_until(lambda: written() == size):
       raise AssertionError(f"{size} bytes não foram gravados: {files_under(self.downloads_root)}")
 
@@ -255,7 +214,7 @@ class ScriptedServerClientTest(unittest.TestCase):
     self.send(p.FILE_DATA, content[p.CHUNK_SIZE:])
     self.send(p.FILE_END, {"sha256": hashlib.sha256(content).hexdigest()})
     self.output.wait_for(CONCLUDED)
-    with open(os.path.join(self.downloads_root, "grande.bin"), "rb") as file:
+    with open(self.downloaded("grande.bin"), "rb") as file:
       self.assertEqual(file.read(), content)
 
 

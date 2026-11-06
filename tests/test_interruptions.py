@@ -14,7 +14,8 @@ import unittest
 import protocol as p
 from server import Server
 from tests.support import (
-  LogRecorder, OutputReader, ThreadErrors, free_port, install_programs, receive_within, wait_until,
+  LogRecorder, OutputReader, ScriptedServerTestCase, ThreadErrors, free_port, install_programs, receive_within,
+  wait_until,
 )
 from tests.test_download import CONCLUDED, files_under, share
 from tests.test_server import address_of
@@ -262,48 +263,7 @@ class RelayedDownloadTest(unittest.TestCase):
     self.assertNotIn("Traceback", self.output.text)
 
 
-class ScriptedServerInterruptionTest(unittest.TestCase):
-  """O cliente roda como no terminal, a partir de uma cópia do programa, e o
-  teste faz o papel do servidor na conexão TCP local, decidindo o que é
-  enviado e quando a conexão termina."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    program = install_programs(os.path.join(base.name, "cliente"))
-    self.downloads_root = os.path.join(program, "downloads")
-    os.mkdir(self.downloads_root)
-
-    listener = socket.create_server(("127.0.0.1", 0))
-    self.addCleanup(listener.close)
-    listener.settimeout(5)
-    self.client = subprocess.Popen(
-      [sys.executable, "-u", os.path.join(program, "client.py"), "127.0.0.1", str(listener.getsockname()[1])],
-      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=base.name,
-      encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-    self.output = OutputReader(self.client.stdout)
-    self.addCleanup(self.output.close)
-    self.addCleanup(self.client.wait, 5)
-    self.addCleanup(self.client.kill)
-    self.addCleanup(self.client.stdin.close)
-    self.server_side, _ = listener.accept()
-    self.addCleanup(self.server_side.close)
-
-  def type_line(self, line):
-    self.client.stdin.write(line + "\n")
-    self.client.stdin.flush()
-
-  def downloaded(self, path):
-    return os.path.join(self.downloads_root, *path.split("/"))
-
-  def request(self, path):
-    self.type_line("2")
-    self.type_line(path)
-    self.assertEqual(receive_within(self.server_side), (p.FILE_REQUEST, {"path": path}))
-
-  def send(self, msg_type, content):
-    self.server_side.sendall(p.encode(msg_type, content))
+class ScriptedServerInterruptionTest(ScriptedServerTestCase):
 
   def start_transfer(self, path, size=3 * p.CHUNK_SIZE):
     """Pede `path`, envia FILE_META e um bloco e espera o bloco chegar ao
