@@ -156,6 +156,22 @@ class OperatorBroadcastTest(ServerProcessTestCase):
     if not wait_until(lambda: output.text.count("Mensagem recusada") == len(refused)):
       raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
 
+  def test_operator_input_that_is_not_utf_8_is_refused_locally_and_the_server_keeps_running(self):
+    """Bytes que não formam texto UTF-8 digitados pelo operador recebem a
+    recusa local; o servidor e as sessões continuam."""
+    process, output, port = self.start_server_process()
+    client = self.connect(port, output)
+
+    process.stdin.buffer.write(b"ol\xe1\n\xff\xfe\n")
+    process.stdin.buffer.flush()
+    self.type_line(process, "depois da recusa")
+
+    self.assertEqual(receive_within(client), (p.CHAT, {"origin": "Servidor", "text": "depois da recusa"}))
+    if not wait_until(lambda: output.text.count("Mensagem recusada") == 2):
+      raise AssertionError(f"recusas não exibidas ao operador: {output.text!r}")
+    self.assertIsNone(process.poll())
+    self.assertNotIn("Traceback", output.text)
+
 
 class OperatorEofTest(ServerProcessTestCase):
   def test_eof_on_operator_input_stops_accepting_and_ends_existing_sessions(self):

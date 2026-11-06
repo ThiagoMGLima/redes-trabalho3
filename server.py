@@ -520,6 +520,9 @@ def main():
   parser = argparse.ArgumentParser(description="Servidor TCP de chat coletivo e transferência de arquivos")
   parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
   args = parser.parse_args()
+  # Bytes digitados que não formam UTF-8 viram substitutos isolados, que
+  # p.check_chat_text recusa, em vez de interromper input() com exceção.
+  sys.stdin.reconfigure(errors="surrogateescape")
 
   server = Server(HOST, args.port)
   try:

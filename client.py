@@ -514,6 +514,10 @@ def main():
   parser.add_argument("host", nargs="?", default=HOST, help=f"endereço do servidor (padrão {HOST})")
   parser.add_argument("port", nargs="?", type=parse_port, default=PORT, help=f"porta TCP (padrão {PORT})")
   args = parser.parse_args()
+  # Bytes digitados que não formam UTF-8 viram substitutos isolados, que o
+  # menu não reconhece e p.check_chat_text e p.check_relative_path recusam,
+  # em vez de interromper input() com exceção.
+  sys.stdin.reconfigure(errors="surrogateescape")
 
   try:
     sock = socket.create_connection((args.host, args.port))

@@ -6,7 +6,9 @@ import unittest
 
 import protocol as p
 from server import Server
-from tests.support import LogRecorder, OutputReader, receive_within, shut_down_within, wait_until
+from tests.support import (
+  LogRecorder, OutputReader, ScriptedServerTestCase, receive_within, shut_down_within, wait_until,
+)
 
 CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "client.py")
 PROMPT = "Escolha uma opção"
@@ -129,6 +131,34 @@ class ClientSessionTest(unittest.TestCase):
     self.output.wait_for("Desconectado do servidor")
     self.client.stdin.close()
     self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn("Traceback", self.output.text)
+
+
+class TerminalInputTest(ScriptedServerTestCase):
+
+  def type_bytes(self, data):
+    """Digita uma linha com os bytes `data`, que podem não formar UTF-8."""
+    self.client.stdin.buffer.write(data + b"\n")
+    self.client.stdin.buffer.flush()
+
+  def test_input_that_is_not_utf_8_is_refused_locally_in_the_menu_the_chat_and_the_path(self):
+    """No menu, a opção não existe; no Chat e no Arquivo, a recusa é local e
+    nada é enviado. O cliente continua: o chat seguinte é o primeiro que
+    chega ao servidor."""
+    self.type_bytes(b"\xff")
+    self.type_line("3")
+    self.type_bytes(b"ol\xe1")
+    self.type_line("2")
+    self.type_bytes(b"arq\xffuivo")
+    self.type_line("3")
+    self.type_line("depois das recusas")
+
+    self.assertEqual(receive_within(self.server_side), (p.CHAT, {"text": "depois das recusas"}))
+    self.output.wait_for("[Você] depois das recusas")
+    self.assertEqual(self.output.text.count("Opção inválida"), 1)
+    self.assertEqual(self.output.text.count("Mensagem recusada"), 1)
+    self.assertEqual(self.output.text.count("Caminho inválido ou proibido"), 1)
+    self.assertIsNone(self.client.poll())
     self.assertNotIn("Traceback", self.output.text)
 
 
