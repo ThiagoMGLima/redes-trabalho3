@@ -64,27 +64,40 @@ def open_shared_file(root, path):
   except p.ForbiddenPath as error:
     raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
   parts = path.split("/")
-  folder = _open_folder(root, None, "a raiz compartilhada", path)
+  shown = _shown(path)
+  folder = _open_folder(root, None, "a raiz compartilhada", shown)
   try:
     for depth, part in enumerate(parts[:-1], start=1):
-      inner = _open_folder(part, folder, "/".join(parts[:depth]), path)
+      inner = _open_folder(part, folder, _shown("/".join(parts[:depth])), shown)
       os.close(folder)
       folder = inner
     try:
       mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode
     except OSError as error:
-      raise _refusal_for(error, path) from None
+      raise _refusal_for(error, shown) from None
     if stat.S_ISLNK(mode):
-      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
     if not stat.S_ISREG(mode):
-      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {shown}")
     try:
       p.check_inside(root, os.path.join(root, *parts))
     except p.ForbiddenPath as error:
       raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
-    return _open_regular(parts[-1], folder, path)
+    return _open_regular(parts[-1], folder, shown)
   finally:
     os.close(folder)
+
+
+# Uma recusa repete o caminho pedido. Um caminho longo aparece encurtado no
+# meio, para que o ERROR caiba no limite do frame qualquer que seja o pedido.
+SHOWN_PATH_LIMIT = 200
+
+
+def _shown(path):
+  if len(path) <= SHOWN_PATH_LIMIT:
+    return path
+  half = SHOWN_PATH_LIMIT // 2
+  return f"{path[:half]}…{path[-half:]}"
 
 
 # Uma pasta é aberta sem seguir links; O_PATH, onde existe, dispensa a
@@ -96,8 +109,8 @@ def _open_folder(name, parent, shown, path):
   """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
   completo, sem `parent`), aberta sem seguir links. Uma falha é
   classificada pelo que está no lugar: link é PATH_FORBIDDEN, algo que não
-  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. `shown` nomeia a
-  pasta na recusa."""
+  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. Na recusa, `shown`
+  nomeia a pasta e `path`, o caminho pedido, ambos já encurtados."""
   try:
     return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
   except OSError as error:

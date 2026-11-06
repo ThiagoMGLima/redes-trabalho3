@@ -404,6 +404,11 @@ class Client:
     self._download = Download(path, destination, self._downloads_root)
     try:
       p.send_message(self._sock, p.FILE_REQUEST, {"path": path})
+    except ValueError as error:
+      # p.encode recusou o frame antes de enviar qualquer byte.
+      self._download = None
+      show(f"Download recusado: o pedido não cabe em uma mensagem ({error}).")
+      return
     except (p.ProtocolError, OSError) as error:
       self._download = None
       show(f"Não foi possível solicitar o arquivo: {error}")

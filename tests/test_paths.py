@@ -25,6 +25,33 @@ def request_frame(path):
   return p.HEADER.pack(p.FILE_REQUEST, len(payload)) + payload
 
 
+# O maior caminho ASCII cujo FILE_REQUEST cabe no limite de conteúdo do frame.
+LONGEST_PATH = p.MAX_CONTENT - len(p.encode(p.FILE_REQUEST, {"path": ""})) + p.HEADER.size
+
+
+def filling_the_frame(prefix):
+  """Caminho permitido que começa com `prefix` e é completado com
+  componentes de até 201 caracteres até ter LONGEST_PATH caracteres."""
+  whole = (LONGEST_PATH - len(prefix) - 2) // 201
+  path = prefix + ("/" + "x" * 200) * whole
+  return path + "/" + "y" * (LONGEST_PATH - len(path) - 1)
+
+
+def folder_chain(root, levels):
+  """Cria sob `root` `levels` pastas de nome com 200 caracteres, uma dentro
+  da outra, cada uma a partir do descritor da anterior, porque o caminho
+  completo passa do limite do sistema. Devolve o caminho relativo da última
+  e seu descritor, que o chamador fecha."""
+  name = "d" * 200
+  folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+  for _ in range(levels):
+    os.mkdir(name, dir_fd=folder)
+    inner = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=folder)
+    os.close(folder)
+    folder = inner
+  return "/".join([name] * levels), folder
+
+
 class ContainmentTest(unittest.TestCase):
   """Contenção na raiz autorizada pela relação entre diretórios, depois de
   resolver os caminhos."""
@@ -239,6 +266,47 @@ class SharedRootTest(unittest.TestCase):
     self.assertNotIn(b"FORA DA RAIZ", served)
     self.assertEqual(self.log.matching("Desconectado:"), [])
 
+  def test_refusal_of_a_path_whose_request_fills_the_frame_keeps_the_session_open(self):
+    """Pedidos permitidos cujo FILE_REQUEST ocupa o limite do frame recebem
+    a recusa normal, que também cabe em um frame, e a sessão continua."""
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession(
+      [filling_the_frame("ausente"), filling_the_frame("presente.txt")], p.NOT_FOUND)
+
+  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
+  def test_access_error_for_a_path_whose_request_fills_the_frame_keeps_the_session_open(self):
+    """Uma pasta sem permissão no começo do caminho e um arquivo sem
+    permissão de leitura no fim de uma cadeia de pastas tão longa que o
+    pedido ocupa o limite do frame."""
+    os.mkdir(self.shared("trancada"), 0)
+    self.addCleanup(os.chmod, self.shared("trancada"), 0o700)
+    chain, folder = folder_chain(self.shared_root, 325)
+    self.addCleanup(os.close, folder)
+    last = LONGEST_PATH - len(chain) - 1
+    os.close(os.open("f" * last, os.O_WRONLY | os.O_CREAT, 0, dir_fd=folder))
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession([filling_the_frame("trancada"), f"{chain}/{'f' * last}"], p.ACCESS_ERROR)
+
+  def test_refusals_deep_inside_the_root_for_paths_whose_request_fills_the_frame_keep_the_session_open(self):
+    """O arquivo ausente, a pasta, o link para arquivo e o link usado como
+    pasta ficam no fim de uma cadeia de pastas tão longa que o pedido ocupa
+    o limite do frame; a recusa repete o caminho ou a pasta e mesmo assim
+    cabe em um frame."""
+    chain, folder = folder_chain(self.shared_root, 325)
+    self.addCleanup(os.close, folder)
+    last = LONGEST_PATH - len(chain) - 1
+    os.mkdir("p" * last, dir_fd=folder)
+    os.symlink("nao-existe.txt", "l" * last, dir_fd=folder)
+    os.symlink(".", "a" * 180, dir_fd=folder)
+    self.start_server()
+
+    self.assertRefusedKeepingTheSession([f"{chain}/{'z' * last}"], p.NOT_FOUND)
+    self.assertRefusedKeepingTheSession([f"{chain}/{'p' * last}"], p.NOT_REGULAR)
+    self.assertRefusedKeepingTheSession(
+      [f"{chain}/{'l' * last}", filling_the_frame(f"{chain}/{'a' * 180}")], p.PATH_FORBIDDEN)
+
   def test_shared_root_that_is_a_symbolic_link_is_forbidden(self):
     """Mesmo apontando para uma pasta real com o arquivo pedido, a raiz que
     é um link recusa todo pedido, sem abrir nada; a sessão continua."""
@@ -322,6 +390,19 @@ class DownloadsRootTest(ScriptedServerTestCase):
     self.assertRefusedLocally(forbidden, FORBIDDEN)
     self.assertEqual(files_under(self.downloads_root), ["permitido.txt"])
     self.assertEqual(os.listdir(self.downloaded("aulas")), [])
+
+  def test_path_whose_request_does_not_fit_in_a_frame_is_refused_locally_without_sending_it(self):
+    """Um caminho permitido cujo FILE_REQUEST ocupa exatamente o limite do
+    frame é pedido; com um caractere a mais, o pedido não cabe em um frame e
+    a recusa é local, sem enviar nada nem encerrar o cliente."""
+    fitting = filling_the_frame("aulas")
+    self.request(fitting)
+    self.send(p.ERROR, {"operation": "FILE_REQUEST", "code": p.NOT_FOUND, "message": "Arquivo inexistente"})
+    self.output.wait_for(f"({p.NOT_FOUND})")
+
+    self.assertRefusedLocally([fitting + "y"], "Download recusado")
+    self.assertIn("excede o limite", self.output.text)
+    self.assertNotIn("Traceback", self.output.text)
 
   def test_symbolic_link_as_a_download_folder_is_refused_locally_without_sending_the_request(self):
     os.mkdir(self.downloaded("aulas"))
