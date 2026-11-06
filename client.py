@@ -528,12 +528,18 @@ class Client:
 
   def _receive_loop(self):
     """Recebe até a conexão terminar. A sessão acaba quando a receptora
-    para, por qualquer motivo: o download ativo é interrompido e, se a saída
-    não foi pedida, a desconexão é exibida sem esperar o teclado."""
+    para, por qualquer motivo: a conexão é encerrada sem esperar o teclado,
+    o download ativo é interrompido e, se a saída não foi pedida, a
+    desconexão é exibida. O socket só é fechado em `run`, depois que a
+    principal deixa de usá-lo."""
     try:
       self._receive_until_end()
     finally:
       self._disconnected.set()
+      try:
+        self._sock.shutdown(socket.SHUT_RDWR)
+      except OSError:
+        pass
       self._interrupt_download()
       if not self._leaving.is_set():
         show("\nDesconectado do servidor. Pressione Enter para sair.")

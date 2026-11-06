@@ -287,11 +287,24 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
     self.assertEqual(self.client.wait(5), 0)
     self.assertNotIn("Traceback", self.output.text)
 
-  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0):
-    """Um download é concluído e outro está em andamento quando a conexão
+  def assertConnectionEndedByTheClient(self):
+    """O cliente encerrou a conexão sem esperar Enter: o lado do servidor
+    vê o fim do stream, sem outro byte."""
+    self.server_side.settimeout(5)
+    try:
+      data = self.server_side.recv(65536)
+    except ConnectionResetError:
+      data = b""
+    except TimeoutError:
+      self.fail("o cliente manteve a conexão aberta à espera de Enter")
+    self.assertEqual(data, b"")
+
+  def assertDisconnectionDiscardsOnlyTheActiveDownload(self, end_connection, timeout=5.0, connection_open=False):
+    """Um download é concluído e outro está em andamento quando a sessão
     termina: a desconexão aparece em até `timeout` segundos sem que se
     pressione Enter, o temporário some, nada mais é anunciado como concluído
-    e o primeiro permanece."""
+    e o primeiro permanece. Com `connection_open`, o servidor não encerrou a
+    conexão, e o cliente a encerra sem esperar Enter."""
     self.request("pronto.txt")
     self.send(p.FILE_META, {"size": 6})
     self.send(p.FILE_DATA, b"pronto")
@@ -307,6 +320,8 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
     self.assertEqual(files_under(self.downloads_root), ["pronto.txt"])
     with open(self.downloaded("pronto.txt"), "rb") as file:
       self.assertEqual(file.read(), b"pronto")
+    if connection_open:
+      self.assertConnectionEndedByTheClient()
     self.assertExitsAfterEnter()
 
   def test_connection_closed_between_frames_before_file_end(self):
@@ -326,9 +341,10 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
 
   def test_receive_deadline_expiring_in_the_middle_of_a_block(self):
     """Um bloco começa a chegar e para, sem que a conexão termine: o prazo
-    de recepção do cliente expira e a sessão acaba como numa desconexão."""
+    de recepção do cliente expira, o cliente encerra a conexão e a sessão
+    acaba como numa desconexão."""
     stall = lambda: self.server_side.sendall(p.encode(p.FILE_DATA, bytes(p.CHUNK_SIZE))[:100])
-    self.assertDisconnectionDiscardsOnlyTheActiveDownload(stall, timeout=p.RECEIVE_TIMEOUT + 5)
+    self.assertDisconnectionDiscardsOnlyTheActiveDownload(stall, timeout=p.RECEIVE_TIMEOUT + 5, connection_open=True)
 
   @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requer permissões POSIX que o usuário não ignore")
   def test_failure_to_remove_the_temporary_after_a_disconnection_is_reported(self):
