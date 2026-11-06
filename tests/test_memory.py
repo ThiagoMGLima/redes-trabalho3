@@ -2,13 +2,18 @@
 
 Cada medição roda server.py e client.py como no terminal, a partir de cópias
 dos programas, sempre com o mesmo roteiro e a mesma carga: um servidor, um
-cliente, um download e a saída. Só o tamanho do arquivo muda. Ao fim, cada
-processo é colhido com os.wait4, que informa o pico de memória residente
-daquele processo (ru_maxrss, em KiB no Linux). O pico inclui tudo o que o
-processo manteve na memória, do interpretador aos blocos do arquivo; por isso
-o teste compara picos entre tamanhos, sem impor teto absoluto ao processo. O
-que cresce de um arquivo pequeno para um grande é a memória que depende do
+cliente, um download e a saída. Só o tamanho do arquivo muda. Depois do
+download, com os dois processos ainda vivos, lê-se o pico de memória
+residente de cada um (VmHWM em /proc/<pid>/status, em KiB), que o núcleo
+acompanha desde o início do programa. O pico inclui tudo o que o processo
+manteve na memória, do interpretador aos blocos do arquivo; por isso o teste
+compara picos entre tamanhos, sem impor teto absoluto ao processo. O que
+cresce de um arquivo pequeno para um grande é a memória que depende do
 tamanho do arquivo.
+
+O ru_maxrss devolvido por os.wait4 não serve: no Linux, o processo criado
+herda o pico do processo que o criou, e o pico da própria suíte de testes
+esconderia o dos programas.
 """
 import os
 import subprocess
@@ -31,11 +36,14 @@ def _start(script, *args, cwd):
   return process, OutputReader(process.stdout)
 
 
-def _reap(process):
-  """Espera o fim do processo e devolve seu pico de memória residente em KiB."""
-  _, status, usage = os.wait4(process.pid, 0)
-  process.returncode = os.waitstatus_to_exitcode(status)
-  return usage.ru_maxrss
+def _peak_kib(process):
+  """Pico de memória residente do processo vivo, em KiB, desde o início do
+  programa."""
+  with open(f"/proc/{process.pid}/status") as status:
+    for line in status:
+      if line.startswith("VmHWM:"):
+        return int(line.split()[1])
+  raise AssertionError(f"VmHWM ausente em /proc/{process.pid}/status")
 
 
 def peak_memory(size):
@@ -62,11 +70,12 @@ def peak_memory(size):
       downloaded = os.path.getsize(os.path.join(client_program, "downloads", "arquivo.bin"))
       if downloaded != size:
         raise AssertionError(f"baixados {downloaded} bytes de {size}")
+      server_peak, client_peak = _peak_kib(server), _peak_kib(client)
       client.stdin.write("1\n")
       client.stdin.flush()
-      client_peak = _reap(client)
+      client.wait(5)
       server.stdin.close()
-      server_peak = _reap(server)
+      server.wait(5)
       if (server.returncode, client.returncode) != (0, 0):
         raise AssertionError(f"saídas {server.returncode} e {client.returncode}: {server_output.text!r}")
       return server_peak, client_peak
@@ -82,7 +91,7 @@ def peak_memory(size):
         output.close()
 
 
-@unittest.skipUnless(sys.platform.startswith("linux"), "usa os.wait4 e ru_maxrss em KiB, como no Linux")
+@unittest.skipUnless(os.path.exists("/proc/self/status"), "lê o pico de memória em /proc/<pid>/status (Linux)")
 class MemoryTest(unittest.TestCase):
 
   SMALL = 1 * MIB
