@@ -533,9 +533,11 @@ def main():
   except OSError as error:
     terminal_log(f"Não foi possível escutar na porta TCP {args.port}: {error}")
     sys.exit(1)
-  terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
-  terminal_log("Digite uma mensagem e Enter para enviá-la a todos os clientes. Ctrl+C ou EOF encerra.")
+  # Com o servidor já aceitando conexões, um Ctrl+C a qualquer momento,
+  # inclusive durante as mensagens iniciais, precisa encerrá-lo.
   try:
+    terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
+    terminal_log("Digite uma mensagem e Enter para enviá-la a todos os clientes. Ctrl+C ou EOF encerra.")
     read_operator_input(server)
   except KeyboardInterrupt:
     terminal_log("Ctrl+C recebido: encerrando o servidor")
