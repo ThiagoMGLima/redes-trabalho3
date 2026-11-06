@@ -6,6 +6,7 @@ conteúdo. Controles são objetos JSON em UTF-8; FILE_DATA leva os bytes
 originais do arquivo. O comprimento conta bytes já codificados.
 """
 import json
+import os
 import select
 import struct
 import time
@@ -42,8 +43,11 @@ MAX_CHAT_BYTES = 1024
 
 NOT_FOUND = "NOT_FOUND"
 PATH_FORBIDDEN = "PATH_FORBIDDEN"
+NOT_REGULAR = "NOT_REGULAR"
+ACCESS_ERROR = "ACCESS_ERROR"
 INVALID_CHAT = "INVALID_CHAT"
 INVALID_REQUEST = "INVALID_REQUEST"
+BUSY = "BUSY"
 
 Message = namedtuple("Message", "type content")
 
@@ -114,20 +118,41 @@ def check_chat_text(text):
 
 def check_relative_path(path):
   """Aceita um caminho relativo à raiz, com `/` como separador. Levanta
-  ForbiddenPath para caminho vazio ou absoluto, componentes vazios, `.` ou
-  `..`, barra invertida, dois-pontos e caracteres de controle (inclusive NUL).
-  A verificação é feita sobre o texto recebido, antes de qualquer
-  normalização, para que uma entrada proibida nunca vire outra aceita."""
+  ForbiddenPath para caminho vazio ou absoluto, texto que não possa ser
+  codificado em UTF-8, componentes vazios, `.` ou `..`, barra invertida,
+  dois-pontos e caracteres de controle (inclusive NUL) ou de quebra de
+  linha, como no chat. A verificação é feita sobre o texto recebido, antes
+  de qualquer normalização, para que uma entrada proibida nunca vire outra
+  aceita."""
   if not path:
     raise ForbiddenPath("o caminho está vazio")
+  try:
+    path.encode("utf-8")
+  except UnicodeEncodeError:
+    raise ForbiddenPath("o caminho não pode ser codificado em UTF-8") from None
   if path.startswith("/"):
     raise ForbiddenPath("caminhos absolutos não são permitidos")
   if "\\" in path or ":" in path:
     raise ForbiddenPath("o caminho não pode conter barra invertida nem dois-pontos")
-  if any(unicodedata.category(char) == "Cc" for char in path):
-    raise ForbiddenPath("o caminho contém caracteres de controle")
+  if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in path):
+    raise ForbiddenPath("o caminho contém caracteres de controle ou quebra de linha")
   if any(part in ("", ".", "..") for part in path.split("/")):
     raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
+
+
+def check_inside(root, target):
+  """Levanta ForbiddenPath se `target`, depois de resolvido, não for a
+  própria raiz `root` resolvida nem estiver abaixo dela. A contenção é
+  verificada pela relação entre diretórios, componente a componente: um
+  prefixo textual semelhante, como `files-outro/` diante de `files/`, não
+  prova contenção."""
+  root = os.path.realpath(root)
+  try:
+    inside = os.path.commonpath([root, os.path.realpath(target)]) == root
+  except ValueError:
+    inside = False
+  if not inside:
+    raise ForbiddenPath("o caminho resolvido sai da raiz autorizada")
 
 
 def send_message(sock, msg_type, content, timeout=SEND_TIMEOUT):

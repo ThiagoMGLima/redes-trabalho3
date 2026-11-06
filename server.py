@@ -1,10 +1,12 @@
 import argparse
 import collections
+import errno
 import hashlib
 import os
 import queue
 import select
 import socket
+import stat
 import sys
 import threading
 
@@ -30,6 +32,113 @@ def parse_port(text):
   if not 1024 < port <= 65535:
     raise argparse.ArgumentTypeError("a porta deve estar entre 1025 e 65535")
   return port
+
+
+class FileRefused(Exception):
+  """Recusa normal de um FILE_REQUEST: `code` é o código estável do ERROR e
+  a mensagem é a explicação legível."""
+
+  def __init__(self, code, message):
+    super().__init__(message)
+    self.code = code
+
+
+def open_shared_file(root, path):
+  """Abre para leitura binária o arquivo `path`, relativo à raiz
+  compartilhada `root`. Levanta FileRefused com PATH_FORBIDDEN para
+  sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
+  ou no arquivo, NOT_FOUND para arquivo inexistente, NOT_REGULAR para
+  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular e
+  ACCESS_ERROR para falta de permissão ou outra falha de acesso, que não se
+  confunde com ausência.
+
+  Cada componente é examinado em ordem, sem seguir links: cada pasta é
+  aberta a partir do descritor da anterior, e o arquivo a partir do
+  descritor da última. Assim um link é recusado antes de se considerar a
+  ausência do que viria depois dele, um objeto não regular nunca é aberto e
+  uma pasta trocada por um link depois de examinada não é seguida, porque o
+  caminho não é resolvido de novo pelo nome. Por fim, o caminho resolvido
+  precisa estar contido na raiz pela relação entre diretórios."""
+  try:
+    p.check_relative_path(path)
+  except p.ForbiddenPath as error:
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+  parts = path.split("/")
+  folder = _open_folder(root, None, "a raiz compartilhada", path)
+  try:
+    for depth, part in enumerate(parts[:-1], start=1):
+      inner = _open_folder(part, folder, "/".join(parts[:depth]), path)
+      os.close(folder)
+      folder = inner
+    try:
+      mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode
+    except OSError as error:
+      raise _refusal_for(error, path) from None
+    if stat.S_ISLNK(mode):
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} é um link simbólico")
+    if not stat.S_ISREG(mode):
+      raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+    try:
+      p.check_inside(root, os.path.join(root, *parts))
+    except p.ForbiddenPath as error:
+      raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+    return _open_regular(parts[-1], folder, path)
+  finally:
+    os.close(folder)
+
+
+# Uma pasta é aberta sem seguir links; O_PATH, onde existe, dispensa a
+# permissão de leitura, como o exame por nome.
+_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
+
+
+def _open_folder(name, parent, shown, path):
+  """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
+  completo, sem `parent`), aberta sem seguir links. Uma falha é
+  classificada pelo que está no lugar: link é PATH_FORBIDDEN, algo que não
+  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. `shown` nomeia a
+  pasta na recusa."""
+  try:
+    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+  except OSError as error:
+    failure = error
+  try:
+    mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+  except OSError:
+    raise _refusal_for(failure, path) from None
+  if stat.S_ISLNK(mode):
+    raise FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
+  if not stat.S_ISDIR(mode):
+    raise FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  raise _refusal_for(failure, path)
+
+
+# Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
+# lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
+# a leitura.
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _open_regular(name, folder, path):
+  try:
+    descriptor = os.open(name, _OPEN_FLAGS, dir_fd=folder)
+  except OSError as error:
+    raise _refusal_for(error, path) from None
+  if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    os.close(descriptor)
+    raise FileRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+  return os.fdopen(descriptor, "rb")
+
+
+def _refusal_for(error, path):
+  """Recusa correspondente a uma falha ao examinar ou abrir `path`: só a
+  ausência é NOT_FOUND; falta de permissão e as demais falhas de acesso são
+  ACCESS_ERROR, e um link encontrado ao abrir é PATH_FORBIDDEN."""
+  if isinstance(error, (FileNotFoundError, NotADirectoryError)):
+    return FileRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+  if error.errno == errno.ELOOP:
+    return FileRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} passa por um link simbólico")
+  return FileRefused(p.ACCESS_ERROR, f"Falha ao acessar o arquivo solicitado: {path} ({error.strerror})")
 
 
 class FileTransfer:
@@ -89,6 +198,7 @@ class Session:
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
+    self._download_active = False
     self._outgoing = queue.Queue(MAX_PENDING)
     self._reader = threading.Thread(target=self._read_loop, name=f"atendimento {name}")
     self._writer = threading.Thread(target=self._write_loop, name=f"escritora {name}")
@@ -100,12 +210,20 @@ class Session:
   def send(self, msg_type, content):
     self._enqueue((msg_type, content))
 
+  @property
+  def download_active(self):
+    """Há um arquivo entregue a `send_file` cujo FILE_END ainda não seguiu
+    para envio. A escritora libera o download antes de enviar o FILE_END, de
+    modo que quem o recebe já pode pedir outro arquivo."""
+    return self._download_active
+
   def send_file(self, file):
     """Enfileira o envio incremental de `file`, aberto em modo binário; a
     escritora o lê bloco a bloco, alternando com as mensagens da fila. A
     sessão passa a ser dona do arquivo e o fecha ao terminar o envio ou ao
-    ser encerrada."""
+    ser encerrada. O download fica ativo até o FILE_END."""
     transfer = FileTransfer(file)
+    self._download_active = True
     if not self._enqueue(transfer):
       transfer.close()
 
@@ -205,9 +323,11 @@ class Session:
         if active is None and files:
           active = files.popleft()
         if active is not None:
-          p.send_message(self.sock, *active.next_message(), timeout=self._send_timeout)
+          message = active.next_message()
           if active.finished:
             active = None
+            self._download_active = False
+          p.send_message(self.sock, *message, timeout=self._send_timeout)
     except p.FrameTimeout:
       return "prazo de envio expirado"
     except OSError as error:
@@ -349,7 +469,11 @@ class Server:
 
   def _receive_file_request(self, session, content):
     """Recusas normais seguem como ERROR; um arquivo aberto é entregue à
-    escritora da sessão, que o envia bloco a bloco."""
+    escritora da sessão, que o envia bloco a bloco. Enquanto a sessão tem um
+    download ativo, todo pedido recebe BUSY e o envio atual prossegue."""
+    if session.download_active:
+      self._refuse(session, "FILE_REQUEST", p.BUSY, "Já existe um download ativo nesta sessão")
+      return
     path = content.get("path") if isinstance(content, dict) else None
     if not isinstance(path, str):
       self._refuse(
@@ -357,14 +481,9 @@ class Server:
       )
       return
     try:
-      p.check_relative_path(path)
-    except p.ForbiddenPath as error:
-      self._refuse(session, "FILE_REQUEST", p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}")
-      return
-    try:
-      file = open(os.path.join(self._shared_root, *path.split("/")), "rb")
-    except (FileNotFoundError, NotADirectoryError):
-      self._refuse(session, "FILE_REQUEST", p.NOT_FOUND, f"Arquivo inexistente: {path}")
+      file = open_shared_file(self._shared_root, path)
+    except FileRefused as refusal:
+      self._refuse(session, "FILE_REQUEST", refusal.code, str(refusal))
       return
     session.send_file(file)
 
