@@ -313,6 +313,22 @@ class ScriptedServerInterruptionTest(ScriptedServerTestCase):
       self.assertConnectionEndedByTheClient()
     self.assertExitsAfterEnter()
 
+  def test_sair_with_a_request_still_pending_interrupts_the_download(self):
+    """O pedido chegou ao servidor, mas o FILE_META ainda não voltou: Sair
+    envia QUIT e o download pendente é marcado como interrompido, sem nada
+    no destino."""
+    self.request("aulas/pendente.bin")
+
+    self.type_line("1")
+
+    self.assertEqual(receive_within(self.server_side), (p.QUIT, {}))
+    self.output.wait_for("Download de aulas/pendente.bin interrompido")
+    self.assertEqual(self.client.wait(5), 0)
+    self.assertNotIn(CONCLUDED, self.output.text)
+    self.assertNotIn("Desconectado do servidor", self.output.text)
+    self.assertEqual(files_under(self.downloads_root), [])
+    self.assertNotIn("Traceback", self.output.text)
+
   def test_connection_closed_between_frames_before_file_end(self):
     self.assertDisconnectionDiscardsOnlyTheActiveDownload(self.server_side.close)
 
