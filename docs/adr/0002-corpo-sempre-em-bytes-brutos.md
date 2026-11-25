@@ -1,0 +1,3 @@
+# O corpo da resposta é sempre lido e enviado como bytes brutos
+
+Todo recurso, seja HTML ou imagem, é aberto em modo binário e enviado sem decodificação nem conversão. Só o `Content-Type` informa ao navegador o tipo do conteúdo. O enunciado pede para mostrar "a diferença entre o envio de texto e de binários", e um leitor pode esperar um ramo que trate HTML como texto. Esse ramo não existe de propósito: ler HTML como texto converteria quebras de linha e codificação e faria o corpo divergir do `Content-Length` calculado pelo tamanho do arquivo. A fronteira entre texto e bytes fica entre os cabeçalhos (texto ASCII codificado para bytes) e o corpo (bytes como estão no disco).

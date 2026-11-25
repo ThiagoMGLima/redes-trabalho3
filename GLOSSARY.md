@@ -1,29 +1,29 @@
-# Trabalho 2
+# Trabalho 3
 
-Vocabulário da aplicação de transferência de arquivos e chat.
+Vocabulário do servidor HTTP simplificado que entrega ao navegador os arquivos de uma pasta.
 
 ## Language
 
-**Chat coletivo**:
-Conversa em que uma mensagem de um cliente é exibida no servidor e encaminhada aos demais clientes, com identificação da origem.
-_Avoid_: Chat privado, conversa individual
+**Pasta raiz**:
+Pasta do servidor cujos arquivos podem ser entregues ao navegador; nada fora dela é acessível.
+_Avoid_: Pasta compartilhada, document root, diretório público
 
-**Identificador do cliente**:
-Identificação automática atribuída pelo servidor a um participante do chat coletivo. Uma reconexão recebe uma nova identificação.
-_Avoid_: Apelido, nome de usuário
+**Recurso**:
+Arquivo regular dentro da pasta raiz, nomeado pelo caminho da URL.
+_Avoid_: Página, documento, arquivo solicitado
 
-**Operador do servidor**:
-Pessoa que usa o terminal do servidor e pode enviar mensagens a todos os clientes conectados.
-_Avoid_: Administrador, cliente do servidor
+**Índice**:
+Recurso entregue quando o caminho da URL é só a raiz (`/`).
+_Avoid_: Página inicial, home
 
-**Broadcast do servidor**:
-Mensagem iniciada pelo operador do servidor e destinada a todos os clientes conectados.
-_Avoid_: Mensagem privada
+**Recurso inexistente**:
+Caminho permitido que não corresponde a um recurso, seja porque nada existe ali, seja porque o que existe não é um arquivo regular.
+_Avoid_: Arquivo não encontrado, erro de arquivo
 
-**Download ativo**:
-Solicitação de arquivo pendente ou transferência em andamento, incluindo a verificação final, que ainda não foi concluída nem encerrada por falha ou saída.
-_Avoid_: Arquivo concluído
+**Caminho bloqueado**:
+Caminho que a política de caminhos recusa antes de qualquer consulta ao conteúdo da pasta raiz, ou que passa por um link simbólico. É distinto de um recurso inexistente.
+_Avoid_: Caminho inválido, acesso proibido, traversal
 
-**Download concluído**:
-Transferência cujo conteúdo teve tamanho e integridade verificados e cujo arquivo está disponível no destino final do cliente.
-_Avoid_: Envio terminado
+**Página de erro**:
+Documento HTML gerado pelo servidor, e não lido da pasta raiz, que explica ao navegador por que o recurso não foi entregue.
+_Avoid_: Página 404, mensagem de erro
