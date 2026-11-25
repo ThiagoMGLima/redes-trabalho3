@@ -25,7 +25,25 @@ REASONS = {
   200: "OK",
 }
 
-HTML = "text/html; charset=utf-8"
+# Content-Type pela extensão, sem diferenciar maiúsculas de minúsculas. Os
+# tipos de texto declaram UTF-8 para que o navegador não precise adivinhar a
+# codificação de páginas sem <meta charset>, como o modelo do enunciado.
+CONTENT_TYPES = {
+  "html": "text/html; charset=utf-8",
+  "htm": "text/html; charset=utf-8",
+  "css": "text/css; charset=utf-8",
+  "js": "text/javascript; charset=utf-8",
+  "txt": "text/plain; charset=utf-8",
+  "json": "application/json",
+  "png": "image/png",
+  "jpg": "image/jpeg",
+  "jpeg": "image/jpeg",
+  "gif": "image/gif",
+  "svg": "image/svg+xml",
+  "ico": "image/x-icon",
+  "webp": "image/webp",
+  "pdf": "application/pdf",
+}
 UNKNOWN_TYPE = "application/octet-stream"
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -83,10 +101,10 @@ def resource_path(target):
 
 
 def content_type(path):
-  """Tipo do conteúdo pela extensão do recurso."""
-  if path.lower().endswith(".html"):
-    return HTML
-  return UNKNOWN_TYPE
+  """Tipo do conteúdo pela extensão do último componente do caminho; sem
+  extensão conhecida, conteúdo binário genérico."""
+  extension = os.path.splitext(path)[1].lower().removeprefix(".")
+  return CONTENT_TYPES.get(extension, UNKNOWN_TYPE)
 
 
 def http_date(moment=None):

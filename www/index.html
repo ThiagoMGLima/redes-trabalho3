@@ -3,9 +3,25 @@
   <head>
     <meta charset="utf-8">
     <title>Trabalho 3 - Redes</title>
+    <link rel="stylesheet" href="/estilo.css">
   </head>
   <body>
     <h1>Servidor HTTP multithread</h1>
-    <p><a href="/pagina.html">Página do enunciado</a></p>
+    <p>Cada recurso desta página chega por uma conexão TCP própria, atendida por uma thread dedicada do servidor.</p>
+
+    <figure>
+      <img src="/foto.jpg" alt="Imagem sintética em JPEG">
+      <figcaption>foto.jpg (image/jpeg)</figcaption>
+    </figure>
+
+    <figure>
+      <img src="/diagrama.png" alt="Diagrama da requisição do navegador e da resposta do servidor">
+      <figcaption>diagrama.png (image/png)</figcaption>
+    </figure>
+
+    <ul>
+      <li><a href="/pagina.html">Página do enunciado</a></li>
+      <li><a href="/grande.png">Imagem grande, com cerca de 20 MB</a></li>
+    </ul>
   </body>
 </html>
