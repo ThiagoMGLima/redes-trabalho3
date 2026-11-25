@@ -12,6 +12,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 
 import protocol as p
 
@@ -145,15 +146,19 @@ class Connection:
   """Atendimento de uma conexão aceita por uma thread dedicada, que guarda o
   estado da conexão: o socket, o endereço do cliente e o nome da thread.
 
-  A thread é a única que lê o socket. `close` é idempotente e pode ser
-  chamado por qualquer thread: a primeira chamada interrompe a conexão e
-  notifica `on_close` uma única vez com o motivo. O socket é fechado pela
-  própria thread de atendimento, ao terminar.
+  A thread lê uma requisição HTTP até a linha em branco, responde com o
+  recurso pedido da pasta raiz e encerra a conexão: uma requisição por
+  conexão. `close` é idempotente e pode ser chamado por qualquer thread: a
+  primeira chamada interrompe a conexão e notifica `on_close` uma única vez
+  com o motivo. O socket é fechado pela própria thread de atendimento, ao
+  terminar.
   """
 
-  def __init__(self, sock, address, number, *, on_close=None):
+  def __init__(self, sock, address, number, *, root=ROOT, log=terminal_log, on_close=None):
     self.sock = sock
     self.address = address
+    self._root = root
+    self._log = log
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
@@ -187,19 +192,52 @@ class Connection:
   def _serve(self):
     reason = "falha inesperada no atendimento"
     try:
-      reason = self._receive_until_end()
+      reason = self._answer()
+    except OSError as error:
+      reason = f"falha na conexão: {error}"
     finally:
       self.close(reason)
       self.sock.close()
 
-  def _receive_until_end(self):
-    while True:
-      try:
-        data = self.sock.recv(RECEIVE_SIZE)
-      except OSError as error:
-        return f"falha na conexão: {error}"
-      if not data:
-        return "conexão encerrada pelo cliente"
+  def _answer(self):
+    started = time.time()
+    head = self._receive_head()
+    if head is None:
+      return "conexão encerrada pelo cliente"
+    try:
+      request = p.parse_request(head)
+    except p.BadRequest as error:
+      return f"requisição malformada: {error}"
+    path = p.resource_path(request.target)
+    try:
+      file = open_resource(self._root, path)
+    except ResourceRefused as refusal:
+      return f"recurso recusado: {refusal}"
+    with file:
+      body = file.read()
+    self.sock.sendall(p.response_head(200, p.content_type(path), len(body)) + body)
+    self._log_request(request, 200, len(body), started)
+    return "resposta enviada"
+
+  def _receive_head(self):
+    """Bytes da requisição até a primeira linha em branco, exclusive, ou
+    None se o cliente fechar a conexão antes dela. O que vier depois da
+    linha em branco é ignorado."""
+    data = bytearray()
+    while (end := data.find(p.HEAD_END)) < 0:
+      chunk = self.sock.recv(RECEIVE_SIZE)
+      if not chunk:
+        return None
+      data += chunk
+    return bytes(data[:end])
+
+  def _log_request(self, request, status, size, started):
+    self._log(f"[{self.name}] {self.address} \"{request.method} {request.target} {request.version}\" "
+              f"{status} {size} bytes (início {_clock(started)}, fim {_clock(time.time())})")
+
+
+def _clock(moment):
+  return time.strftime("%H:%M:%S", time.localtime(moment)) + f".{int(moment * 1000) % 1000:03d}"
 
 
 class Server:
@@ -281,7 +319,8 @@ class Server:
     if full:
       self._refuse_connection(sock, address)
       return
-    connection = Connection(sock, address, number, on_close=self._end_connection)
+    connection = Connection(sock, address, number, root=self._root, log=self._log,
+                            on_close=self._end_connection)
     with self._lock:
       self._connections.add(connection)
       # Uma conexão sai do conjunto ao ser encerrada, mas o encerramento do
