@@ -1,3 +1,5 @@
 __pycache__/
 .claude/worktrees/
 /dist/
+# Arquivos avulsos na raiz não fazem parte do projeto; o enunciado fica em Enunciado/.
+/*.pdf

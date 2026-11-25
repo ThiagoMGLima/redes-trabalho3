@@ -33,24 +33,35 @@ def terminal_log(line):
   print(line, flush=True)
 
 
+_LABELS = {
+  p.BLOCKED_PATH: "Caminho bloqueado",
+  p.NOT_FOUND: "Recurso inexistente",
+  p.NOT_REGULAR: "Recurso inexistente",
+  p.ACCESS_ERROR: "Falha ao acessar o recurso",
+}
+
+
 class ResourceRefused(Exception):
   """Recusa da abertura de um recurso: `code` diz o motivo (caminho
-  proibido, inexistente, não regular ou falha de acesso) e a mensagem é a
-  explicação legível."""
+  bloqueado, recurso inexistente, objeto que não é arquivo regular ou falha
+  de acesso), `label` o nomeia no vocabulário do glossário e `detail`
+  explica o caso."""
 
-  def __init__(self, code, message):
-    super().__init__(message)
+  def __init__(self, code, detail):
     self.code = code
+    self.label = _LABELS[code]
+    self.detail = detail
+    super().__init__(f"{self.label}: {detail}")
 
 
 def open_resource(root, path):
   """Abre para leitura binária o recurso `path`, relativo à pasta raiz
-  `root`. Levanta ResourceRefused com PATH_FORBIDDEN para
-  sintaxe proibida ou link simbólico na raiz, em qualquer pasta do caminho
-  ou no arquivo, NOT_FOUND para arquivo inexistente, NOT_REGULAR para
-  pasta, FIFO, dispositivo ou outro objeto que não seja arquivo regular e
-  ACCESS_ERROR para falta de permissão ou outra falha de acesso, que não se
-  confunde com ausência.
+  `root`. Levanta ResourceRefused com BLOCKED_PATH para sintaxe proibida ou
+  link simbólico na raiz, em qualquer pasta do caminho ou no arquivo,
+  NOT_FOUND quando nada existe no caminho, NOT_REGULAR para pasta, FIFO,
+  dispositivo ou outro objeto que não seja arquivo regular e ACCESS_ERROR
+  para falta de permissão ou outra falha de acesso, que não se confunde com
+  ausência.
 
   Cada componente é examinado em ordem, sem seguir links: cada pasta é
   aberta a partir do descritor da anterior, e o arquivo a partir do
@@ -61,8 +72,8 @@ def open_resource(root, path):
   precisa estar contido na raiz pela relação entre diretórios."""
   try:
     p.check_relative_path(path)
-  except p.ForbiddenPath as error:
-    raise ResourceRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+  except p.BlockedPath as error:
+    raise ResourceRefused(p.BLOCKED_PATH, str(error)) from None
   parts = path.split("/")
   shown = _shown(path)
   folder = _open_folder(root, None, "a pasta raiz", shown)
@@ -76,13 +87,13 @@ def open_resource(root, path):
     except OSError as error:
       raise _refusal_for(error, shown) from None
     if stat.S_ISLNK(mode):
-      raise ResourceRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
+      raise _link(shown)
     if not stat.S_ISREG(mode):
-      raise ResourceRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {shown}")
+      raise _not_regular(shown)
     try:
       p.check_inside(root, os.path.join(root, *parts))
-    except p.ForbiddenPath as error:
-      raise ResourceRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {error}") from None
+    except p.BlockedPath as error:
+      raise ResourceRefused(p.BLOCKED_PATH, str(error)) from None
     return _open_regular(parts[-1], folder, shown)
   finally:
     os.close(folder)
@@ -100,14 +111,33 @@ def _shown(path):
   return f"{path[:half]}…{path[-half:]}"
 
 
+def _link(name):
+  return ResourceRefused(p.BLOCKED_PATH, f"{name} é um link simbólico")
+
+
+def _not_regular(name):
+  return ResourceRefused(p.NOT_REGULAR, f"{name} não é um arquivo regular")
+
+
+# Uma pasta é aberta sem seguir links, e o descritor obtido é o ponto de
+# partida da operação seguinte; o caminho não é resolvido de novo pelo nome.
+# O_PATH, onde existe, dispensa a permissão de leitura, como o exame por nome.
+_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
+
+# Ao abrir o arquivo, não seguir um link nem esperar por um FIFO que tenha
+# tomado o lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK
+# não altera a leitura.
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
 def _open_folder(name, parent, shown, path):
   """Descritor da pasta `name`, relativa ao descritor `parent` (ou caminho
   completo, sem `parent`), aberta sem seguir links. Uma falha é
-  classificada pelo que está no lugar: link é PATH_FORBIDDEN, algo que não
-  é pasta é NOT_FOUND e as demais seguem `_refusal_for`. Na recusa, `shown`
+  classificada pelo que está no lugar: link é BLOCKED_PATH, algo que não é
+  pasta é NOT_FOUND e as demais seguem `_refusal_for`. Na recusa, `shown`
   nomeia a pasta e `path`, o caminho pedido, ambos já encurtados."""
   try:
-    return os.open(name, p.FOLDER_FLAGS, dir_fd=parent)
+    return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
   except OSError as error:
     failure = error
   try:
@@ -115,16 +145,10 @@ def _open_folder(name, parent, shown, path):
   except OSError:
     raise _refusal_for(failure, path) from None
   if stat.S_ISLNK(mode):
-    raise ResourceRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {shown} é um link simbólico")
+    raise _link(shown)
   if not stat.S_ISDIR(mode):
-    raise ResourceRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+    raise ResourceRefused(p.NOT_FOUND, path)
   raise _refusal_for(failure, path)
-
-
-# Ao abrir, não seguir um link nem esperar por um FIFO que tenha tomado o
-# lugar do arquivo depois do exame; em arquivo regular, O_NONBLOCK não altera
-# a leitura.
-_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 def _open_regular(name, folder, path):
@@ -134,19 +158,19 @@ def _open_regular(name, folder, path):
     raise _refusal_for(error, path) from None
   if not stat.S_ISREG(os.fstat(descriptor).st_mode):
     os.close(descriptor)
-    raise ResourceRefused(p.NOT_REGULAR, f"Não é um arquivo regular: {path}")
+    raise _not_regular(path)
   return os.fdopen(descriptor, "rb")
 
 
 def _refusal_for(error, path):
   """Recusa correspondente a uma falha ao examinar ou abrir `path`: só a
   ausência é NOT_FOUND; falta de permissão e as demais falhas de acesso são
-  ACCESS_ERROR, e um link encontrado ao abrir é PATH_FORBIDDEN."""
+  ACCESS_ERROR, e um link encontrado ao abrir é BLOCKED_PATH."""
   if isinstance(error, (FileNotFoundError, NotADirectoryError)):
-    return ResourceRefused(p.NOT_FOUND, f"Arquivo inexistente: {path}")
+    return ResourceRefused(p.NOT_FOUND, path)
   if error.errno == errno.ELOOP:
-    return ResourceRefused(p.PATH_FORBIDDEN, f"Caminho inválido ou proibido: {path} passa por um link simbólico")
-  return ResourceRefused(p.ACCESS_ERROR, f"Falha ao acessar o arquivo solicitado: {path} ({error.strerror})")
+    return ResourceRefused(p.BLOCKED_PATH, f"{path} passa por um link simbólico")
+  return ResourceRefused(p.ACCESS_ERROR, f"{path} ({error.strerror})")
 
 
 class Connection:
@@ -245,7 +269,7 @@ class Connection:
     except _NothingReceived:
       return "prazo de recepção expirado sem nenhum byte recebido"
     except p.RequestError as error:
-      status, size = self._send_error(None, error.status, str(error))
+      status, size = self._send_error(error.method, error.status, str(error))
       self._log_request("(requisição incompleta)", status, size, started)
       return "resposta de erro enviada"
     if head is None:
@@ -274,7 +298,7 @@ class Connection:
       return self._refuse(request, path, refusal)
     with file:
       if p.names_a_folder(requested):
-        return self._send_error(request.method, 404, f"O recurso {request.target} não existe neste servidor.")
+        return self._send_error(request.method, 404, p.explanation(404, request.target))
       size = os.fstat(file.fileno()).st_size
       self.sock.sendall(p.response_head(200, p.content_type(path), size))
       if request.method != "HEAD":
@@ -282,17 +306,14 @@ class Connection:
     return 200, size
 
   def _refuse(self, request, path, refusal):
-    """Resposta de erro para um recurso que não pôde ser aberto: caminho
-    bloqueado é 403, recurso inexistente é 404 e falha de acesso a um
-    recurso existente é 500, que não se confunde com ausência."""
-    if refusal.code == p.PATH_FORBIDDEN:
-      self._log(f"[{self.name}] Caminho bloqueado: {request.target} (decodificado: {path!r}). {refusal}")
-      return self._send_error(
-        request.method, 403, f"O caminho {request.target} foi bloqueado: só os recursos da pasta raiz podem ser acessados.")
-    if refusal.code in (p.NOT_FOUND, p.NOT_REGULAR):
-      return self._send_error(request.method, 404, f"O recurso {request.target} não existe neste servidor.")
-    self._log(f"[{self.name}] Falha de acesso: {request.target}. {refusal}")
-    return self._send_error(request.method, 500, f"O recurso {request.target} não pôde ser lido pelo servidor.")
+    """Resposta de erro para um recurso que não pôde ser aberto, pelo motivo
+    da recusa: caminho bloqueado é 403, recurso inexistente é 404 e falha de
+    acesso a um recurso existente é 500, que não se confunde com ausência.
+    Bloqueios e falhas de acesso ficam registrados no terminal."""
+    status = p.REFUSAL_STATUS[refusal.code]
+    if status != 404:
+      self._log(f"[{self.name}] {refusal.label}: {request.target} (decodificado: {path!r}). {refusal.detail}")
+    return self._send_error(request.method, status, p.explanation(status, request.target))
 
   def _send_error(self, method, status, explanation):
     """Envia a página de erro com seu tamanho exato em bytes; para HEAD, só
@@ -324,14 +345,16 @@ class Connection:
     porque não há requisição a responder."""
     data = bytearray()
     deadline = time.monotonic() + self._receive_timeout
+    too_large = f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco."
     while (end := data.find(p.HEAD_END)) < 0:
       if len(data) >= p.MAX_HEAD + len(p.HEAD_END):
-        raise p.RequestError(431, f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco.")
+        raise p.RequestError(431, too_large, p.method_of(data))
       remaining = deadline - time.monotonic()
       if remaining <= 0:
         if not data:
           raise _NothingReceived()
-        raise p.RequestError(408, f"A requisição não chegou completa em {self._receive_timeout:g} segundos.")
+        raise p.RequestError(408, f"A requisição não chegou completa em {self._receive_timeout:g} segundos.",
+                             p.method_of(data))
       self.sock.settimeout(remaining)
       try:
         chunk = self.sock.recv(RECEIVE_SIZE)
@@ -342,7 +365,7 @@ class Connection:
       data += chunk
     self.sock.settimeout(self._send_timeout)
     if end > p.MAX_HEAD:
-      raise p.RequestError(431, f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco.")
+      raise p.RequestError(431, too_large, p.method_of(data))
     return bytes(data[:end])
 
   def _log_request(self, line, status, size, started):

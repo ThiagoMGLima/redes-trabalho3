@@ -4,17 +4,12 @@ import datetime
 import email.utils
 import os
 import re
-import socket
-import tempfile
 import time
 import unittest
 
-from server import Server
-from tests.support import LogRecorder, shut_down_within
+from tests.support import PAGE, HttpTestCase, Response, put
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-PAGE = "<html><body><h1>Olá, você</h1>\r\n<p>conteúdo</p></body></html>\n".encode("utf-8")
 
 # Modelo de página do enunciado do Trabalho 3, sem alterações.
 TEMPLATE = """<html>
@@ -32,74 +27,6 @@ TEMPLATE = """<html>
 
 IMF_FIXDATE = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} "
                          r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$")
-
-
-def put(root, path, content):
-  full = os.path.join(root, *path.split("/"))
-  os.makedirs(os.path.dirname(full), exist_ok=True)
-  with open(full, "wb") as file:
-    file.write(content)
-
-
-class Response:
-  """Resposta lida até o fechamento da conexão, separada na primeira linha
-  em branco."""
-
-  def __init__(self, data):
-    head, separator, self.body = data.partition(b"\r\n\r\n")
-    if not separator:
-      raise AssertionError(f"resposta sem linha em branco: {data[:200]!r}")
-    lines = head.decode("ascii").split("\r\n")
-    self.status_line = lines[0]
-    self.header_lines = lines[1:]
-    self.headers = {}
-    for line in self.header_lines:
-      name, _, value = line.partition(": ")
-      self.headers[name.lower()] = value
-
-  @property
-  def status(self):
-    return int(self.status_line.split(" ")[1])
-
-
-class HttpTestCase(unittest.TestCase):
-  """Servidor real numa porta livre, com a pasta raiz `www/` num diretório
-  temporário."""
-
-  def setUp(self):
-    base = tempfile.TemporaryDirectory()
-    self.addCleanup(base.cleanup)
-    self.root = os.path.join(base.name, "www")
-    os.mkdir(self.root)
-
-  def start_server(self, root=None, **options):
-    self.log = LogRecorder()
-    self.server = Server("127.0.0.1", 0, log=self.log, root=root or self.root, **options)
-    self.server.start()
-    self.addCleanup(shut_down_within, self.server)
-
-  def open_connection(self):
-    sock = socket.create_connection(self.server.address, timeout=5)
-    self.addCleanup(sock.close)
-    return sock
-
-  def read_until_closed(self, sock):
-    data = bytearray()
-    while chunk := sock.recv(65536):
-      data += chunk
-    return bytes(data)
-
-  def exchange(self, raw):
-    """Envia `raw` de uma vez, lê a resposta inteira e fecha a conexão, como
-    o navegador faz depois de uma resposta com Connection: close."""
-    sock = self.open_connection()
-    sock.sendall(raw)
-    data = self.read_until_closed(sock)
-    sock.close()
-    return Response(data)
-
-  def get(self, target):
-    return self.exchange(f"GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
 
 
 class SuccessfulGetTest(HttpTestCase):
@@ -317,18 +244,6 @@ class DemonstrationSiteTest(HttpTestCase):
 
 
 class NotFoundTest(HttpTestCase):
-  def assertErrorPage(self, response, status_line, title):
-    self.assertEqual(response.status_line, status_line)
-    self.assertEqual(
-      [line.split(":")[0] for line in response.header_lines],
-      ["Date", "Server", "Content-Type", "Content-Length", "Connection", "Cache-Control"])
-    self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
-    self.assertEqual(response.headers["content-length"], str(len(response.body)))
-    page = response.body.decode("utf-8")
-    self.assertTrue(page.startswith("<!DOCTYPE html>"), page)
-    self.assertIn(title, page)
-    return page
-
   def test_missing_resource_gets_404_with_an_html_error_page_in_portuguese(self):
     put(self.root, "pagina.html", PAGE)
     self.start_server()

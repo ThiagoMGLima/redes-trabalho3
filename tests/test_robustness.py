@@ -7,8 +7,7 @@ import socket
 import time
 import unittest
 
-from tests.support import ThreadErrors
-from tests.test_http import PAGE, HttpTestCase, Response, put
+from tests.support import PAGE, HttpTestCase, Response, ThreadErrors, put
 
 SHORT_DEADLINE = 0.5
 
@@ -23,13 +22,6 @@ class RobustnessTestCase(HttpTestCase):
     options.setdefault("receive_timeout", SHORT_DEADLINE)
     super().start_server(**options)
 
-  def assertError(self, response, status_line, title):
-    self.assertEqual(response.status_line, status_line)
-    self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
-    self.assertEqual(response.headers["content-length"], str(len(response.body)))
-    self.assertEqual(response.headers["connection"], "close")
-    self.assertIn(title, response.body.decode("utf-8"))
-
   def assertStillServing(self):
     self.assertEqual(self.get("/pagina.html").body, PAGE)
     self.assertEqual(self.thread_errors.errors, [])
@@ -43,7 +35,7 @@ class MalformedRequestTest(RobustnessTestCase):
                  b"GET /pagina.html HTTP/1.1 extra", b" GET /pagina.html HTTP/1.1"):
       with self.subTest(line=line):
         response = self.exchange(line + b"\r\nHost: localhost\r\n\r\n")
-        self.assertError(response, "HTTP/1.1 400 Bad Request", "Requisição inválida")
+        self.assertErrorPage(response, "HTTP/1.1 400 Bad Request", "Requisição inválida")
     self.assertStillServing()
 
   def test_target_that_does_not_start_with_a_slash_gets_400(self):
@@ -54,21 +46,13 @@ class MalformedRequestTest(RobustnessTestCase):
         response = self.exchange(b"GET " + target + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
         self.assertEqual(response.status, 400)
 
-  def test_version_that_is_not_http_syntax_gets_400(self):
-    self.start_server()
-
-    for version in (b"HTTP/1", b"http/1.1", b"FOO", b"HTTP/1.1.1"):
-      with self.subTest(version=version):
-        response = self.exchange(b"GET /pagina.html " + version + b"\r\nHost: localhost\r\n\r\n")
-        self.assertEqual(response.status, 400)
-
   def test_header_without_colon_or_with_space_in_the_name_gets_400(self):
     self.start_server()
 
     for header in (b"Host localhost", b"Host : localhost", b"  continuacao", b": sem nome"):
       with self.subTest(header=header):
         response = self.exchange(b"GET /pagina.html HTTP/1.1\r\nHost: localhost\r\n" + header + b"\r\n\r\n")
-        self.assertError(response, "HTTP/1.1 400 Bad Request", "Requisição inválida")
+        self.assertErrorPage(response, "HTTP/1.1 400 Bad Request", "Requisição inválida")
     self.assertStillServing()
 
   def test_http_1_1_request_without_host_gets_400_but_http_1_0_does_not_need_it(self):
@@ -77,7 +61,7 @@ class MalformedRequestTest(RobustnessTestCase):
     without_host = self.exchange(b"GET /pagina.html HTTP/1.1\r\nAccept: */*\r\n\r\n")
     old = self.exchange(b"GET /pagina.html HTTP/1.0\r\n\r\n")
 
-    self.assertError(without_host, "HTTP/1.1 400 Bad Request", "Requisição inválida")
+    self.assertErrorPage(without_host, "HTTP/1.1 400 Bad Request", "Requisição inválida")
     self.assertIn("Host", without_host.body.decode("utf-8"))
     self.assertEqual(old.status, 200)
     self.assertEqual(old.body, PAGE)
@@ -94,10 +78,11 @@ class UnsupportedRequestTest(RobustnessTestCase):
   def test_version_other_than_http_1_0_and_1_1_gets_505(self):
     self.start_server()
 
-    for version in (b"HTTP/2.0", b"HTTP/0.9", b"HTTP/1.2", b"HTTP/3.0"):
+    for version in (b"HTTP/2.0", b"HTTP/0.9", b"HTTP/1.2", b"HTTP/3.0", b"HTTP/2", b"HTTP/1", b"http/1.1", b"FOO",
+                    b"HTTP/1.1.1"):
       with self.subTest(version=version):
         response = self.exchange(b"GET /pagina.html " + version + b"\r\nHost: localhost\r\n\r\n")
-        self.assertError(response, "HTTP/1.1 505 HTTP Version Not Supported", "Versão do HTTP não suportada")
+        self.assertErrorPage(response, "HTTP/1.1 505 HTTP Version Not Supported", "Versão do HTTP não suportada")
     self.assertStillServing()
 
   def test_method_other_than_get_and_head_gets_405_with_allow(self):
@@ -106,7 +91,7 @@ class UnsupportedRequestTest(RobustnessTestCase):
     for method in (b"POST", b"PUT", b"DELETE", b"OPTIONS", b"get", b"Head"):
       with self.subTest(method=method):
         response = self.exchange(method + b" /pagina.html HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        self.assertError(response, "HTTP/1.1 405 Method Not Allowed", "Método não permitido")
+        self.assertErrorPage(response, "HTTP/1.1 405 Method Not Allowed", "Método não permitido")
         self.assertEqual(response.headers["allow"], "GET, HEAD")
     self.assertStillServing()
 
@@ -118,10 +103,27 @@ class UnsupportedRequestTest(RobustnessTestCase):
       b"POST /pagina.html HTTP/3.0\r\nsem dois pontos\r\n\r\n": 505,
       b"POST /pagina.html HTTP/1.1\r\nsem dois pontos\r\n\r\n": 405,
       b"GET /..%2Fsegredo HTTP/1.1\r\nsem dois pontos\r\n\r\n": 400,
+      b"GET pagina.html HTTP/2.0\r\nHost: x\r\n\r\n": 505,
+      b"OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n": 405,
+      b"GET pagina.html HTTP/1.1\r\nsem dois pontos\r\n\r\n": 400,
     }
     for raw, status in cases.items():
       with self.subTest(raw=raw):
         self.assertEqual(self.exchange(raw).status, status)
+
+  def test_head_cut_by_the_size_limit_or_the_deadline_gets_the_headers_without_body(self):
+    self.start_server()
+
+    oversized = self.exchange(b"HEAD /pagina.html HTTP/1.1\r\nHost: localhost\r\nX-Enorme: " + b"a" * 9000)
+    sock = self.open_connection()
+    sock.sendall(b"HEAD /pagina.html HTTP/1.1\r\nHost: localhost\r\n")
+    late = Response(self.read_until_closed(sock))
+
+    for response, status in ((oversized, 431), (late, 408)):
+      with self.subTest(status=status):
+        self.assertEqual(response.status, status)
+        self.assertGreater(int(response.headers["content-length"]), 0)
+        self.assertEqual(response.body, b"")
 
   def test_head_with_an_error_gets_the_headers_without_body(self):
     self.start_server()
@@ -140,7 +142,7 @@ class OversizedRequestTest(RobustnessTestCase):
     filler = b"X-Enchimento: " + b"a" * 8192 + b"\r\n"
     response = self.exchange(b"GET /pagina.html HTTP/1.1\r\nHost: localhost\r\n" + filler + b"\r\n")
 
-    self.assertError(response, "HTTP/1.1 431 Request Header Fields Too Large", "Cabeçalho grande demais")
+    self.assertErrorPage(response, "HTTP/1.1 431 Request Header Fields Too Large", "Cabeçalho grande demais")
     self.assertStillServing()
 
   def test_head_of_exactly_8_kib_is_accepted(self):
@@ -171,7 +173,7 @@ class DeadlineTest(RobustnessTestCase):
     started = time.monotonic()
     response = Response(self.read_until_closed(sock))
 
-    self.assertError(response, "HTTP/1.1 408 Request Timeout", "Tempo esgotado")
+    self.assertErrorPage(response, "HTTP/1.1 408 Request Timeout", "Tempo esgotado")
     self.assertLess(time.monotonic() - started, SHORT_DEADLINE + 2)
     self.assertStillServing()
 
@@ -250,7 +252,7 @@ class AccessErrorTest(RobustnessTestCase):
 
     for target in ("/fechado.html", "/trancada/dentro.html", "/trancada/ausente.html"):
       with self.subTest(target=target):
-        self.assertError(self.get(target), "HTTP/1.1 500 Internal Server Error", "Erro interno do servidor")
+        self.assertErrorPage(self.get(target), "HTTP/1.1 500 Internal Server Error", "Erro interno do servidor")
     self.assertStillServing()
 
 

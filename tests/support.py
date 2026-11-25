@@ -1,8 +1,12 @@
 import ctypes
 import os
 import socket
+import tempfile
 import threading
 import time
+import unittest
+
+from server import Server
 
 
 _AT_FDCWD = -100
@@ -164,3 +168,90 @@ class OutputReader:
   def wait_for(self, text, timeout=5.0):
     if not wait_until(lambda: text in self.text, timeout):
       raise AssertionError(f"{text!r} não apareceu na saída: {self.text!r}")
+
+
+PAGE = "<html><body><h1>Olá, você</h1>\r\n<p>conteúdo</p></body></html>\n".encode("utf-8")
+
+
+def put(root, path, content):
+  full = os.path.join(root, *path.split("/"))
+  os.makedirs(os.path.dirname(full), exist_ok=True)
+  with open(full, "wb") as file:
+    file.write(content)
+
+
+class Response:
+  """Resposta lida até o fechamento da conexão, separada na primeira linha
+  em branco."""
+
+  def __init__(self, data):
+    head, separator, self.body = data.partition(b"\r\n\r\n")
+    if not separator:
+      raise AssertionError(f"resposta sem linha em branco: {data[:200]!r}")
+    lines = head.decode("ascii").split("\r\n")
+    self.status_line = lines[0]
+    self.header_lines = lines[1:]
+    self.headers = {}
+    for line in self.header_lines:
+      name, _, value = line.partition(": ")
+      self.headers[name.lower()] = value
+
+  @property
+  def status(self):
+    return int(self.status_line.split(" ")[1])
+
+
+class HttpTestCase(unittest.TestCase):
+  """Servidor real numa porta livre, com a pasta raiz `www/` num diretório
+  temporário."""
+
+  def setUp(self):
+    base = tempfile.TemporaryDirectory()
+    self.addCleanup(base.cleanup)
+    self.root = os.path.join(base.name, "www")
+    os.mkdir(self.root)
+
+  def start_server(self, root=None, **options):
+    self.log = LogRecorder()
+    self.server = Server("127.0.0.1", 0, log=self.log, root=root or self.root, **options)
+    self.server.start()
+    self.addCleanup(shut_down_within, self.server)
+
+  def open_connection(self):
+    sock = socket.create_connection(self.server.address, timeout=5)
+    self.addCleanup(sock.close)
+    return sock
+
+  def read_until_closed(self, sock):
+    data = bytearray()
+    while chunk := sock.recv(65536):
+      data += chunk
+    return bytes(data)
+
+  def exchange(self, raw):
+    """Envia `raw` de uma vez, lê a resposta inteira e fecha a conexão, como
+    o navegador faz depois de uma resposta com Connection: close."""
+    sock = self.open_connection()
+    sock.sendall(raw)
+    data = self.read_until_closed(sock)
+    sock.close()
+    return Response(data)
+
+  def get(self, target):
+    return self.exchange(f"GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+
+  def assertErrorPage(self, response, status_line, title):
+    """A resposta é a página de erro HTML esperada, com os seis cabeçalhos
+    de toda resposta, na ordem, e o tamanho exato; devolve o texto da
+    página."""
+    self.assertEqual(response.status_line, status_line)
+    self.assertEqual(
+      [line.split(":")[0] for line in response.header_lines][:6],
+      ["Date", "Server", "Content-Type", "Content-Length", "Connection", "Cache-Control"])
+    self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
+    self.assertEqual(response.headers["content-length"], str(len(response.body)))
+    self.assertEqual(response.headers["connection"], "close")
+    page = response.body.decode("utf-8")
+    self.assertTrue(page.startswith("<!DOCTYPE html>"), page)
+    self.assertIn(title, page)
+    return page

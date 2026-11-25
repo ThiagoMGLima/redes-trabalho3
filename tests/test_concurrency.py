@@ -6,8 +6,7 @@ import socket
 import time
 import unittest
 
-from tests.support import ThreadErrors, shut_down_within, wait_until
-from tests.test_http import PAGE, HttpTestCase, Response, put
+from tests.support import PAGE, HttpTestCase, Response, ThreadErrors, put, shut_down_within
 
 LARGE = 16 * 1024 * 1024
 SHORT_DEADLINE = 0.5
