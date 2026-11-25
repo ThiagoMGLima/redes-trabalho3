@@ -72,9 +72,9 @@ class HttpTestCase(unittest.TestCase):
     self.root = os.path.join(base.name, "www")
     os.mkdir(self.root)
 
-  def start_server(self, root=None):
+  def start_server(self, root=None, **options):
     self.log = LogRecorder()
-    self.server = Server("127.0.0.1", 0, log=self.log, root=root or self.root)
+    self.server = Server("127.0.0.1", 0, log=self.log, root=root or self.root, **options)
     self.server.start()
     self.addCleanup(shut_down_within, self.server)
 

@@ -7,6 +7,7 @@ porta da linha de comando.
 import argparse
 import html
 import os
+import re
 import time
 import unicodedata
 from collections import namedtuple
@@ -19,14 +20,26 @@ DEFAULT_PORT = 8080
 HEAD_END = b"\r\n\r\n"
 LINE_END = "\r\n"
 
+# Limite da requisição, da linha de requisição até a linha em branco.
+MAX_HEAD = 8 * 1024
+
 SERVER_NAME = "ServidorRedes/1.0"
 INDEX = "index.html"
+
+METHODS = ("GET", "HEAD")
+VERSIONS = ("HTTP/1.0", "HTTP/1.1")
+_VERSION_SYNTAX = re.compile(r"HTTP/[0-9]\.[0-9]")
 
 REASONS = {
   200: "OK",
   400: "Bad Request",
   403: "Forbidden",
   404: "Not Found",
+  405: "Method Not Allowed",
+  408: "Request Timeout",
+  431: "Request Header Fields Too Large",
+  500: "Internal Server Error",
+  505: "HTTP Version Not Supported",
 }
 
 # Título da página de erro, para quem lê no navegador.
@@ -34,6 +47,16 @@ TITLES = {
   400: "Requisição inválida",
   403: "Acesso negado",
   404: "Recurso não encontrado",
+  405: "Método não permitido",
+  408: "Tempo esgotado",
+  431: "Cabeçalho grande demais",
+  500: "Erro interno do servidor",
+  505: "Versão do HTTP não suportada",
+}
+
+# Cabeçalhos que só certas respostas de erro levam.
+EXTRA_HEADERS = {
+  405: [f"Allow: {', '.join(METHODS)}"],
 }
 
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
@@ -79,37 +102,58 @@ class ForbiddenPath(ValueError):
   """Caminho com sintaxe proibida; a mensagem traz o motivo."""
 
 
-class BadRequest(ValueError):
-  """Requisição que não segue a sintaxe do HTTP; a mensagem traz o motivo."""
+class RequestError(Exception):
+  """Requisição que não pode ser atendida: `status` é o código da resposta
+  de erro, a mensagem é a explicação da página de erro e `method` é o
+  método da requisição, quando a linha de requisição chegou a ser lida."""
+
+  def __init__(self, status, explanation, method=None):
+    super().__init__(explanation)
+    self.status = status
+    self.method = method
 
 
 def parse_request(head):
   """Interpreta os bytes da requisição até a linha em branco, exclusive.
 
   A primeira linha é a linha de requisição: método, alvo e versão separados
-  por um espaço. As seguintes são cabeçalhos `Nome: valor`; o nome é
-  guardado em minúsculas, porque não diferencia maiúsculas de minúsculas.
-  Os bytes são lidos como ISO-8859-1, que aceita qualquer octeto, para que
-  a sintaxe seja verificada sem falha de decodificação."""
+  por exatamente um espaço. As seguintes são cabeçalhos `Nome: valor`; o
+  nome é guardado em minúsculas, porque não diferencia maiúsculas de
+  minúsculas. Os bytes são lidos como ISO-8859-1, que aceita qualquer
+  octeto, para que a sintaxe seja verificada sem falha de decodificação.
+
+  A verificação segue uma ordem fixa: a estrutura da linha (400), a versão
+  (505), o método (405) e os cabeçalhos (400), inclusive o Host, exigido
+  em HTTP/1.1 pela RFC 9112."""
   lines = head.decode("iso-8859-1").split(LINE_END)
   parts = lines[0].split(" ")
-  if len(parts) != 3:
-    raise BadRequest("a linha de requisição não tem método, alvo e versão")
+  if len(parts) != 3 or not all(parts):
+    raise RequestError(400, "A linha de requisição deve ter método, alvo e versão separados por um espaço.")
   method, target, version = parts
+  if not target.startswith("/"):
+    raise RequestError(400, f"O alvo {target} não começa com /.", method)
+  if not _VERSION_SYNTAX.fullmatch(version):
+    raise RequestError(400, f"A versão {version} não segue a sintaxe HTTP/x.y.", method)
+  if version not in VERSIONS:
+    raise RequestError(505, f"A versão {version} não é suportada; use HTTP/1.0 ou HTTP/1.1.", method)
+  if method not in METHODS:
+    raise RequestError(405, f"O método {method} não é aceito; use GET ou HEAD.", method)
   headers = {}
   for line in lines[1:]:
     name, separator, value = line.partition(":")
-    if not separator:
-      raise BadRequest(f"cabeçalho sem dois-pontos: {line!r}")
+    if not separator or not name or any(space in name for space in " \t"):
+      raise RequestError(400, f"O cabeçalho {line!r} não segue a forma Nome: valor.", method)
     headers[name.lower()] = value.strip(" \t")
+  if version == "HTTP/1.1" and "host" not in headers:
+    raise RequestError(400, "Uma requisição HTTP/1.1 precisa do cabeçalho Host.", method)
   return Request(method, target, version, headers)
 
 
 def request_path(target):
   """Caminho pedido no alvo da requisição, decodificado: sem a query string
   e o fragmento, com cada `%XX` trocado pelo byte que representa e o
-  resultado lido como UTF-8. Levanta BadRequest para `%` sem dois dígitos
-  hexadecimais ou bytes que não formam UTF-8.
+  resultado lido como UTF-8. Levanta RequestError (400) para `%` sem dois
+  dígitos hexadecimais ou bytes que não formam UTF-8.
 
   A decodificação vem antes de qualquer verificação do caminho: assim
   `..%2F..%2Fetc%2Fpasswd` chega à política de caminhos como
@@ -123,7 +167,7 @@ def request_path(target):
     if raw[position] == ord("%"):
       digits = raw[position + 1:position + 3]
       if len(digits) != 2 or any(digit not in _HEX_DIGITS for digit in digits):
-        raise BadRequest(f"codificação % inválida no caminho {target}")
+        raise RequestError(400, f"O caminho {target} tem uma codificação % inválida.")
       decoded.append(int(digits, 16))
       position += 3
     else:
@@ -132,7 +176,7 @@ def request_path(target):
   try:
     return decoded.decode("utf-8")
   except UnicodeDecodeError:
-    raise BadRequest(f"o caminho {target} não é texto UTF-8") from None
+    raise RequestError(400, f"O caminho {target} não é texto UTF-8.") from None
 
 
 def resource_path(target):
@@ -189,7 +233,7 @@ def error_page(status, explanation):
   return page.encode("utf-8")
 
 
-def response_head(status, content_type, length):
+def response_head(status, content_type, length, extra=()):
   """Linha de status, cabeçalhos e a linha em branco que os encerra, como
   texto ASCII já codificado em bytes. O corpo é enviado em seguida, sem
   passar por aqui."""
@@ -201,6 +245,7 @@ def response_head(status, content_type, length):
     f"Content-Length: {length}",
     "Connection: close",
     "Cache-Control: no-store",
+    *extra,
   ]
   return (LINE_END.join(lines) + LINE_END + LINE_END).encode("ascii")
 
