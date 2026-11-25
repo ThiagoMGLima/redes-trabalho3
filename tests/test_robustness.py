@@ -194,12 +194,14 @@ class DeadlineTest(RobustnessTestCase):
     self.assertLess(answered, 2 * SHORT_DEADLINE)
 
   def test_error_page_reaches_a_client_that_is_still_sending_when_the_server_answers(self):
-    """O servidor responde 431 antes de ler tudo o que o cliente manda; a
-    página de erro chega inteira em vez de se perder num reset."""
+    """O servidor responde 431 antes de ler tudo o que o cliente mandou, e o
+    cliente só lê depois que o servidor já terminou; a página de erro chega
+    inteira em vez de se perder num reset."""
     self.start_server()
     sock = self.open_connection()
 
-    sock.sendall(b"GET /pagina.html HTTP/1.1\r\nHost: localhost\r\nX-Enorme: " + b"a" * 200_000)
+    sock.sendall(b"GET /pagina.html HTTP/1.1\r\nHost: localhost\r\nX-Enorme: " + b"a" * 20_000)
+    time.sleep(0.3)
 
     self.assertEqual(Response(self.read_until_closed(sock)).status, 431)
 

@@ -90,10 +90,13 @@ class HttpTestCase(unittest.TestCase):
     return bytes(data)
 
   def exchange(self, raw):
-    """Envia `raw` de uma vez e devolve a resposta inteira."""
+    """Envia `raw` de uma vez, lê a resposta inteira e fecha a conexão, como
+    o navegador faz depois de uma resposta com Connection: close."""
     sock = self.open_connection()
     sock.sendall(raw)
-    return Response(self.read_until_closed(sock))
+    data = self.read_until_closed(sock)
+    sock.close()
+    return Response(data)
 
   def get(self, target):
     return self.exchange(f"GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
