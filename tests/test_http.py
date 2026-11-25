@@ -313,6 +313,109 @@ class DemonstrationSiteTest(HttpTestCase):
       self.assertIn(reference, index)
 
 
+class NotFoundTest(HttpTestCase):
+  def assertErrorPage(self, response, status_line, title):
+    self.assertEqual(response.status_line, status_line)
+    self.assertEqual(
+      [line.split(":")[0] for line in response.header_lines],
+      ["Date", "Server", "Content-Type", "Content-Length", "Connection", "Cache-Control"])
+    self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
+    self.assertEqual(response.headers["content-length"], str(len(response.body)))
+    page = response.body.decode("utf-8")
+    self.assertTrue(page.startswith("<!DOCTYPE html>"), page)
+    self.assertIn(title, page)
+    return page
+
+  def test_missing_resource_gets_404_with_an_html_error_page_in_portuguese(self):
+    put(self.root, "pagina.html", PAGE)
+    self.start_server()
+
+    response = self.get("/nao-existe.html")
+
+    page = self.assertErrorPage(response, "HTTP/1.1 404 Not Found", "Recurso não encontrado")
+    self.assertIn("/nao-existe.html", page)
+
+  def test_folders_other_than_the_root_and_paths_inside_missing_folders_get_404(self):
+    put(self.root, "aulas/resumo.txt", b"resumo")
+    os.mkdir(os.path.join(self.root, "vazia"))
+    self.start_server()
+
+    for target in ("/aulas", "/aulas/", "/vazia", "/nada/arquivo.html", "/aulas/resumo.txt/dentro"):
+      with self.subTest(target=target):
+        self.assertErrorPage(self.get(target), "HTTP/1.1 404 Not Found", "Recurso não encontrado")
+
+  @unittest.skipUnless(hasattr(os, "mkfifo"), "requer FIFO")
+  def test_fifo_gets_404_without_blocking_the_server(self):
+    os.mkfifo(os.path.join(self.root, "canal"))
+    self.start_server()
+
+    self.assertErrorPage(self.get("/canal"), "HTTP/1.1 404 Not Found", "Recurso não encontrado")
+
+  def test_root_without_an_index_gets_404(self):
+    self.start_server()
+
+    self.assertEqual(self.get("/").status, 404)
+
+  def test_error_page_does_not_depend_on_the_root_folder(self):
+    self.start_server(root=os.path.join(self.root, "nao-existe"))
+
+    self.assertErrorPage(self.get("/pagina.html"), "HTTP/1.1 404 Not Found", "Recurso não encontrado")
+
+  def test_requested_path_is_shown_escaped_in_the_error_page(self):
+    self.start_server()
+
+    page = self.get("/<b>x&y</b>.html").body.decode("utf-8")
+
+    self.assertIn("/&lt;b&gt;x&amp;y&lt;/b&gt;.html", page)
+    self.assertNotIn("<b>x", page)
+
+  def test_404_is_logged_and_the_server_keeps_serving(self):
+    put(self.root, "pagina.html", PAGE)
+    self.start_server()
+
+    response = self.get("/nao-existe.html")
+
+    self.log.wait_for(f'"GET /nao-existe.html HTTP/1.1" 404 {len(response.body)} bytes')
+    self.assertEqual(self.get("/pagina.html").body, PAGE)
+
+
+class HeadTest(HttpTestCase):
+  def head(self, target):
+    return self.exchange(f"HEAD {target} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+
+  def assertSameHeadersWithoutBody(self, target):
+    get = self.get(target)
+    head = self.head(target)
+    self.assertEqual(head.status_line, get.status_line)
+    without_date = lambda response: [line for line in response.header_lines if not line.startswith("Date:")]
+    self.assertEqual(without_date(head), without_date(get))
+    self.assertRegex(head.headers["date"], IMF_FIXDATE)
+    self.assertEqual(head.body, b"")
+    return get
+
+  def test_head_of_an_existing_resource_gets_the_headers_of_the_get_without_body(self):
+    content = os.urandom(200 * 1024)
+    put(self.root, "foto.jpg", content)
+    self.start_server()
+
+    get = self.assertSameHeadersWithoutBody("/foto.jpg")
+    self.assertEqual(get.headers["content-length"], str(len(content)))
+
+  def test_head_of_a_missing_resource_gets_the_headers_of_the_404_without_body(self):
+    self.start_server()
+
+    get = self.assertSameHeadersWithoutBody("/nao-existe.html")
+    self.assertEqual(get.status, 404)
+
+  def test_head_is_logged_with_the_length_announced(self):
+    put(self.root, "pagina.html", PAGE)
+    self.start_server()
+
+    self.head("/pagina.html")
+
+    self.log.wait_for(f'"HEAD /pagina.html HTTP/1.1" 200 {len(PAGE)} bytes')
+
+
 class StatementTemplateTest(HttpTestCase):
   def test_the_page_of_the_statement_is_served_unchanged_from_the_project_root_folder(self):
     self.start_server(root=os.path.join(PROJECT_ROOT, "www"))
