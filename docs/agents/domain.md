@@ -2,10 +2,10 @@
 
 ## Escopo e layout
 
-A raiz do projeto é `Trabalho2/`. O layout é single-context:
+A raiz do projeto é `Trabalho3/`. O layout é single-context:
 
-- `GLOSSARY.md`: vocabulário do Trabalho 2.
-- `docs/adr/`: decisões de arquitetura do Trabalho 2.
+- `GLOSSARY.md`: vocabulário do Trabalho 3.
+- `docs/adr/`: decisões de arquitetura do Trabalho 3.
 
 ## Antes de explorar o projeto
 

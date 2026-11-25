@@ -12,9 +12,9 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Repository: **`ThiagoMGLima/redes-trabalho2`** — https://github.com/ThiagoMGLima/redes-trabalho2 (private; GitHub Issues enabled).
+Repository: **`ThiagoMGLima/redes-trabalho3`** — https://github.com/ThiagoMGLima/redes-trabalho3 (private; GitHub Issues enabled).
 
-Run commands from the Trabalho 2 project root. Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone. When outside the clone, use `--repo OWNER/REPO` with the configured repository.
+Run commands from the Trabalho 3 project root. Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone. When outside the clone, use `--repo OWNER/REPO` with the configured repository.
 
 ## Pull requests as a triage surface
 
