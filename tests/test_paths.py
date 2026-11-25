@@ -4,7 +4,6 @@ import os
 import unittest
 
 import protocol as p
-from server import ResourceRefused, open_resource
 from tests.support import CAN_EXCHANGE, Swapper
 from tests.test_http import HttpTestCase, put
 
@@ -209,23 +208,6 @@ class TargetDecodingTest(PathTestCase):
         self.assertEqual(response.status_line, "HTTP/1.1 400 Bad Request")
         self.assertEqual(response.headers["content-length"], str(len(response.body)))
         self.assertIn("Requisição inválida", response.body.decode("utf-8"))
-
-
-class AccessErrorTest(PathTestCase):
-  """Transitório: o ticket da robustez (500) leva este caso à fronteira HTTP."""
-
-  @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "root ignora as permissões de arquivo")
-  def test_missing_permission_is_an_access_error_and_not_a_missing_resource(self):
-    put(self.root, "fechado.txt", b"sem leitura")
-    put(self.root, "trancada/dentro.txt", b"atras da pasta")
-    os.chmod(self.inside("fechado.txt"), 0)
-    os.chmod(self.inside("trancada"), 0)
-    self.addCleanup(os.chmod, self.inside("trancada"), 0o700)
-
-    for path in ("fechado.txt", "trancada/dentro.txt", "trancada/ausente.txt"):
-      with self.subTest(path=path), self.assertRaises(ResourceRefused) as refusal:
-        open_resource(self.root, path)
-      self.assertEqual(refusal.exception.code, p.ACCESS_ERROR)
 
 
 if __name__ == "__main__":

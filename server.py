@@ -21,6 +21,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
 MAX_CONNECTIONS = 10
 RECEIVE_SIZE = 4096
 BLOCK_SIZE = 64 * 1024
+RECEIVE_TIMEOUT = 10.0
 
 
 def terminal_log(line):
@@ -155,11 +156,13 @@ class Connection:
   terminar.
   """
 
-  def __init__(self, sock, address, number, *, root=ROOT, log=terminal_log, on_close=None):
+  def __init__(self, sock, address, number, *, root=ROOT, log=terminal_log, receive_timeout=RECEIVE_TIMEOUT,
+               on_close=None):
     self.sock = sock
     self.address = address
     self._root = root
     self._log = log
+    self._receive_timeout = receive_timeout
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
@@ -202,18 +205,24 @@ class Connection:
 
   def _answer(self):
     started = time.time()
-    head = self._receive_head()
+    try:
+      head = self._receive_head()
+    except _NothingReceived:
+      return "prazo de recepção expirado sem nenhum byte recebido"
+    except p.RequestError as error:
+      status, size = self._send_error(None, error.status, str(error))
+      self._log_request("(requisição incompleta)", status, size, started)
+      return "resposta de erro enviada"
     if head is None:
       return "conexão encerrada pelo cliente"
     try:
       request = p.parse_request(head)
-    except p.BadRequest as error:
-      return f"requisição malformada: {error}"
-    try:
-      status, size = self._respond(request)
-    except ResourceRefused as refusal:
-      return f"recurso recusado: {refusal}"
-    self._log_request(request, status, size, started)
+    except p.RequestError as error:
+      status, size = self._send_error(error.method, error.status, str(error))
+      self._log_request(head.split(b"\r\n", 1)[0].decode("iso-8859-1"), status, size, started)
+      return "resposta de erro enviada"
+    status, size = self._respond(request)
+    self._log_request(f"{request.method} {request.target} {request.version}", status, size, started)
     return "resposta enviada"
 
   def _respond(self, request):
@@ -221,33 +230,41 @@ class Connection:
     anunciado. Para HEAD, o cabeçalho é o mesmo do GET, sem o corpo."""
     try:
       requested = p.request_path(request.target)
-    except p.BadRequest as error:
-      return self._send_error(request, 400, f"A requisição não pôde ser interpretada: {error}.")
+    except p.RequestError as error:
+      return self._send_error(request.method, error.status, str(error))
     path = p.resource_path(requested)
     try:
       file = open_resource(self._root, path)
     except ResourceRefused as refusal:
-      if refusal.code == p.PATH_FORBIDDEN:
-        self._log(f"[{self.name}] Caminho bloqueado: {request.target} (decodificado: {path!r}). {refusal}")
-        return self._send_error(
-          request, 403, f"O caminho {request.target} foi bloqueado: só os recursos da pasta raiz podem ser acessados.")
-      if refusal.code in (p.NOT_FOUND, p.NOT_REGULAR):
-        return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
-      raise
+      return self._refuse(request, path, refusal)
     with file:
       if p.names_a_folder(requested):
-        return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
+        return self._send_error(request.method, 404, f"O recurso {request.target} não existe neste servidor.")
       size = os.fstat(file.fileno()).st_size
       self.sock.sendall(p.response_head(200, p.content_type(path), size))
       if request.method != "HEAD":
         self._send_body(file)
     return 200, size
 
-  def _send_error(self, request, status, explanation):
-    """Envia a página de erro com seu tamanho exato em bytes."""
+  def _refuse(self, request, path, refusal):
+    """Resposta de erro para um recurso que não pôde ser aberto: caminho
+    bloqueado é 403, recurso inexistente é 404 e falha de acesso a um
+    recurso existente é 500, que não se confunde com ausência."""
+    if refusal.code == p.PATH_FORBIDDEN:
+      self._log(f"[{self.name}] Caminho bloqueado: {request.target} (decodificado: {path!r}). {refusal}")
+      return self._send_error(
+        request.method, 403, f"O caminho {request.target} foi bloqueado: só os recursos da pasta raiz podem ser acessados.")
+    if refusal.code in (p.NOT_FOUND, p.NOT_REGULAR):
+      return self._send_error(request.method, 404, f"O recurso {request.target} não existe neste servidor.")
+    self._log(f"[{self.name}] Falha de acesso: {request.target}. {refusal}")
+    return self._send_error(request.method, 500, f"O recurso {request.target} não pôde ser lido pelo servidor.")
+
+  def _send_error(self, method, status, explanation):
+    """Envia a página de erro com seu tamanho exato em bytes; para HEAD, só
+    o cabeçalho."""
     page = p.error_page(status, explanation)
-    self.sock.sendall(p.response_head(status, p.CONTENT_TYPES["html"], len(page)))
-    if request.method != "HEAD":
+    self.sock.sendall(p.response_head(status, p.CONTENT_TYPES["html"], len(page), p.EXTRA_HEADERS.get(status, ())))
+    if method != "HEAD":
       self.sock.sendall(page)
     return status, len(page)
 
@@ -259,20 +276,46 @@ class Connection:
       self.sock.sendall(block)
 
   def _receive_head(self):
-    """Bytes da requisição até a primeira linha em branco, exclusive, ou
-    None se o cliente fechar a conexão antes dela. O que vier depois da
-    linha em branco é ignorado."""
+    """Bytes da requisição até a primeira linha em branco (CRLF CRLF),
+    exclusive, ou None se o cliente fechar a conexão antes dela. O que vier
+    depois da linha em branco é ignorado.
+
+    A requisição inteira precisa chegar dentro do prazo de recepção, contado
+    desde o início, e caber em MAX_HEAD bytes. Levanta RequestError com 408
+    quando o prazo expira no meio da requisição e com 431 quando ela passa
+    do limite; se o prazo expira sem nenhum byte, levanta _NothingReceived,
+    porque não há requisição a responder."""
     data = bytearray()
+    deadline = time.monotonic() + self._receive_timeout
     while (end := data.find(p.HEAD_END)) < 0:
-      chunk = self.sock.recv(RECEIVE_SIZE)
+      if len(data) >= p.MAX_HEAD + len(p.HEAD_END):
+        raise p.RequestError(431, f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco.")
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        if not data:
+          raise _NothingReceived()
+        raise p.RequestError(408, f"A requisição não chegou completa em {self._receive_timeout:g} segundos.")
+      self.sock.settimeout(remaining)
+      try:
+        chunk = self.sock.recv(RECEIVE_SIZE)
+      except TimeoutError:
+        continue
       if not chunk:
         return None
       data += chunk
+    self.sock.settimeout(None)
+    if end > p.MAX_HEAD:
+      raise p.RequestError(431, f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco.")
     return bytes(data[:end])
 
-  def _log_request(self, request, status, size, started):
-    self._log(f"[{self.name}] {self.address} \"{request.method} {request.target} {request.version}\" "
+  def _log_request(self, line, status, size, started):
+    shown = "".join(char if char.isprintable() else repr(char)[1:-1] for char in line[:200])
+    self._log(f"[{self.name}] {self.address} \"{shown}\" "
               f"{status} {size} bytes (início {_clock(started)}, fim {_clock(time.time())})")
+
+
+class _NothingReceived(Exception):
+  """O prazo de recepção expirou sem que nenhum byte da requisição chegasse."""
 
 
 def _clock(moment):
@@ -280,11 +323,12 @@ def _clock(moment):
 
 
 class Server:
-  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, log=terminal_log, root=ROOT):
+  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, log=terminal_log, root=ROOT, receive_timeout=RECEIVE_TIMEOUT):
     self._host = host
     self._port = port
     self._root = root
     self._log = log
+    self._receive_timeout = receive_timeout
     self._lock = threading.Lock()
     self._connections = set()
     self._started = []
@@ -359,7 +403,7 @@ class Server:
       self._refuse_connection(sock, address)
       return
     connection = Connection(sock, address, number, root=self._root, log=self._log,
-                            on_close=self._end_connection)
+                            receive_timeout=self._receive_timeout, on_close=self._end_connection)
     with self._lock:
       self._connections.add(connection)
       # Uma conexão sai do conjunto ao ser encerrada, mas o encerramento do
