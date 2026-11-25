@@ -1,8 +1,10 @@
 """Materiais de entrega, rodando os scripts como no terminal: as cópias sem
-comentários para a gravação do vídeo e o ZIP do código-fonte."""
+comentários para a gravação do vídeo, as linhas que o roteiro do vídeo cita
+nelas e o ZIP do código-fonte."""
 import ast
 import io
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -17,6 +19,8 @@ from tests.support import OutputReader, free_port
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(PROJECT_ROOT, "scripts")
 PROGRAMS = ("server.py", "protocol.py")
+VIDEO_SCRIPT = os.path.join(PROJECT_ROOT, "docs", "roteiro-video.md")
+CITED_LINE = re.compile(r"^\| `(server\.py|protocol\.py)` \| (\d+) \| `(.+)` \|$")
 
 
 def run_script(name, *args):
@@ -109,6 +113,16 @@ class RecordingCopiesTest(unittest.TestCase):
     self.assertIn(os.path.join(self.destination, "www"), output.text)
     process.send_signal(signal.SIGINT)
     self.assertEqual(process.wait(5), 0)
+
+  @unittest.skipUnless(os.path.isfile(VIDEO_SCRIPT), "o roteiro do vídeo não faz parte do ZIP")
+  def test_lines_cited_in_the_video_script_hold_the_code_it_names(self):
+    cited = [match.groups() for line in read(VIDEO_SCRIPT).splitlines() if (match := CITED_LINE.match(line))]
+    copies = {name: read(os.path.join(self.destination, name)).split("\n") for name in PROGRAMS}
+
+    self.assertGreater(len(cited), 0, "o roteiro não tem a tabela de linhas citadas")
+    for name, number, code in cited:
+      with self.subTest(name=name, line=number):
+        self.assertIn(code, copies[name][int(number) - 1])
 
   def test_destination_that_is_not_empty_is_refused_without_touching_it(self):
     result = run_script("preparar_gravacao.py", self.destination)
