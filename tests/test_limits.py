@@ -4,7 +4,7 @@ import time
 import unittest
 
 from server import MAX_CONNECTIONS
-from tests.test_http import Response
+from tests.support import Response
 from tests.test_server import ServerTestCase, address_of
 
 

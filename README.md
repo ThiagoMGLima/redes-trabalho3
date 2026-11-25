@@ -60,13 +60,13 @@ A verificação segue uma ordem fixa, e cada falha tem seu código:
 
 | Ordem | Verificação | Falha |
 |---|---|---|
-| 1 | Três partes e alvo começando com `/` | 400 Bad Request |
-| 2 | Versão `HTTP/1.0` ou `HTTP/1.1` | 505 HTTP Version Not Supported (400 se nem for `HTTP/x.y`) |
+| 1 | Três partes separadas por um espaço | 400 Bad Request |
+| 2 | Versão `HTTP/1.0` ou `HTTP/1.1` | 505 HTTP Version Not Supported |
 | 3 | Método `GET` ou `HEAD` | 405 Method Not Allowed, com `Allow: GET, HEAD` |
-| 4 | Cabeçalhos `Nome: valor`; `Host` obrigatório em HTTP/1.1 (RFC 9112) | 400 Bad Request |
+| 4 | Alvo começando com `/` e cabeçalhos `Nome: valor`; `Host` obrigatório em HTTP/1.1 (RFC 9112) | 400 Bad Request |
 | 5 | Caminho (ver D8) | 400, 403, 404 ou 500 |
 
-O método HEAD recebe exatamente o cabeçalho que o GET receberia, sem o corpo.
+O método HEAD recebe exatamente o cabeçalho que o GET receberia, sem o corpo, inclusive nas respostas de erro.
 
 ### Fim dos cabeçalhos (D2)
 
@@ -153,7 +153,7 @@ As linhas de status seguem a RFC 9110: `HTTP/1.1 <código> <frase>`, com a frase
 | 503 Service Unavailable | Mais de 64 conexões simultâneas |
 | 505 HTTP Version Not Supported | Versão diferente de HTTP/1.0 e 1.1 |
 
-### Path traversal (D8)
+### Caminho bloqueado: proteção contra path traversal (D8)
 
 O caminho da URL passa por estas etapas antes de qualquer arquivo ser aberto:
 
@@ -163,7 +163,11 @@ O caminho da URL passa por estas etapas antes de qualquer arquivo ser aberto:
 4. **Abertura sem seguir links:** cada pasta do caminho é aberta a partir do descritor da anterior, com `O_NOFOLLOW`. Um link simbólico em qualquer ponto, mesmo apontando para dentro da raiz, bloqueia o pedido. Uma pasta trocada por um link durante a requisição também não é seguida, porque o caminho não é resolvido de novo pelo nome.
 5. **Contenção:** por fim, o caminho resolvido precisa estar dentro da pasta raiz, pela relação entre diretórios (`realpath` e `commonpath`), e não por comparação de texto.
 
-Um caminho bloqueado recebe **403** com a página "Acesso negado" e fica registrado no terminal com o alvo recebido e o caminho decodificado.
+Um caminho bloqueado recebe **403** com a página "Acesso negado" e fica registrado no terminal com o alvo recebido, o caminho decodificado e o motivo:
+
+```text
+[conexão 2] Caminho bloqueado: /..%2F..%2F..%2Fetc%2Fpasswd (decodificado: '../../../etc/passwd'). o caminho contém componentes vazios, '.' ou '..'
+```
 
 **Como demonstrar.** O navegador normaliza `../` e `%2e%2e` antes de enviar a requisição. Digitar `http://localhost:8080/../../etc/passwd` faz o navegador pedir `/etc/passwd`, sem traversal nenhum. Para mostrar o bloqueio:
 - **no navegador:** use `%2F`, que o navegador não altera: `http://localhost:8080/..%2F..%2F..%2Fetc%2Fpasswd`;

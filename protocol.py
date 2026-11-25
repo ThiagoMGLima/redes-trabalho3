@@ -7,7 +7,6 @@ porta da linha de comando.
 import argparse
 import html
 import os
-import re
 import time
 import unicodedata
 from collections import namedtuple
@@ -28,7 +27,6 @@ INDEX = "index.html"
 
 METHODS = ("GET", "HEAD")
 VERSIONS = ("HTTP/1.0", "HTTP/1.1")
-_VERSION_SYNTAX = re.compile(r"HTTP/[0-9]\.[0-9]")
 
 REASONS = {
   200: "OK",
@@ -89,19 +87,21 @@ _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
 
 Request = namedtuple("Request", "method target version headers")
 
+# Motivos de recusa de um recurso e o status de cada um.
+BLOCKED_PATH = "BLOCKED_PATH"
 NOT_FOUND = "NOT_FOUND"
-PATH_FORBIDDEN = "PATH_FORBIDDEN"
 NOT_REGULAR = "NOT_REGULAR"
 ACCESS_ERROR = "ACCESS_ERROR"
+REFUSAL_STATUS = {
+  BLOCKED_PATH: 403,
+  NOT_FOUND: 404,
+  NOT_REGULAR: 404,
+  ACCESS_ERROR: 500,
+}
 
-# Uma pasta é aberta sem seguir links, e o descritor obtido é o ponto de
-# partida da operação seguinte; o caminho não é resolvido de novo pelo nome.
-# O_PATH, onde existe, dispensa a permissão de leitura, como o exame por nome.
-FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_PATH", 0)
 
-
-class ForbiddenPath(ValueError):
-  """Caminho com sintaxe proibida; a mensagem traz o motivo."""
+class BlockedPath(ValueError):
+  """Caminho bloqueado pela política de caminhos; a mensagem traz o motivo."""
 
 
 class RequestError(Exception):
@@ -125,21 +125,19 @@ def parse_request(head):
   octeto, para que a sintaxe seja verificada sem falha de decodificação.
 
   A verificação segue uma ordem fixa: a estrutura da linha (400), a versão
-  (505), o método (405) e os cabeçalhos (400), inclusive o Host, exigido
-  em HTTP/1.1 pela RFC 9112."""
+  (505), o método (405), o alvo e os cabeçalhos (400), inclusive o Host,
+  exigido em HTTP/1.1 pela RFC 9112."""
   lines = head.decode("iso-8859-1").split(LINE_END)
   parts = lines[0].split(" ")
   if len(parts) != 3 or not all(parts):
     raise RequestError(400, "A linha de requisição deve ter método, alvo e versão separados por um espaço.")
   method, target, version = parts
-  if not target.startswith("/"):
-    raise RequestError(400, f"O alvo {target} não começa com /.", method)
-  if not _VERSION_SYNTAX.fullmatch(version):
-    raise RequestError(400, f"A versão {version} não segue a sintaxe HTTP/x.y.", method)
   if version not in VERSIONS:
     raise RequestError(505, f"A versão {version} não é suportada; use HTTP/1.0 ou HTTP/1.1.", method)
   if method not in METHODS:
     raise RequestError(405, f"O método {method} não é aceito; use GET ou HEAD.", method)
+  if not target.startswith("/"):
+    raise RequestError(400, f"O alvo {target} não começa com /.", method)
   headers = {}
   for line in lines[1:]:
     name, separator, value = line.partition(":")
@@ -149,6 +147,14 @@ def parse_request(head):
   if version == "HTTP/1.1" and "host" not in headers:
     raise RequestError(400, "Uma requisição HTTP/1.1 precisa do cabeçalho Host.", method)
   return Request(method, target, version, headers)
+
+
+def method_of(data):
+  """Método de uma requisição ainda incompleta: a primeira palavra da
+  primeira linha, ou None se ela ainda não terminou. Serve para que um HEAD
+  cortado pelo prazo ou pelo limite também receba a resposta sem corpo."""
+  line, separator, _ = bytes(data).partition(b" ")
+  return line.decode("iso-8859-1") if separator and b"\r\n" not in line else None
 
 
 def request_path(target):
@@ -212,6 +218,18 @@ def http_date(moment=None):
           f"{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} GMT")
 
 
+# Explicação da página de erro de um recurso recusado, para o alvo pedido.
+_EXPLANATIONS = {
+  403: "O caminho {target} foi bloqueado: só os recursos da pasta raiz podem ser acessados.",
+  404: "O recurso {target} não existe neste servidor.",
+  500: "O recurso {target} não pôde ser lido pelo servidor.",
+}
+
+
+def explanation(status, target):
+  return _EXPLANATIONS[status].format(target=target)
+
+
 def error_page(status, explanation):
   """Página de erro em HTML, gerada aqui e não lida da pasta raiz, já
   codificada em UTF-8: é texto montado pelo servidor, ao contrário do corpo
@@ -272,30 +290,30 @@ def _breaks_the_line(text):
 
 def check_relative_path(path):
   """Aceita um caminho relativo à raiz, com `/` como separador. Levanta
-  ForbiddenPath para caminho vazio ou absoluto, texto que não possa ser
+  BlockedPath para caminho vazio ou absoluto, texto que não possa ser
   codificado em UTF-8, componentes vazios, `.` ou `..`, barra invertida,
   dois-pontos e caracteres de controle (inclusive NUL) ou de quebra de
   linha. A verificação é feita sobre o texto recebido, antes
   de qualquer normalização, para que uma entrada proibida nunca vire outra
   aceita."""
   if not path:
-    raise ForbiddenPath("o caminho está vazio")
+    raise BlockedPath("o caminho está vazio")
   try:
     path.encode("utf-8")
   except UnicodeEncodeError:
-    raise ForbiddenPath("o caminho não pode ser codificado em UTF-8") from None
+    raise BlockedPath("o caminho não pode ser codificado em UTF-8") from None
   if path.startswith("/"):
-    raise ForbiddenPath("caminhos absolutos não são permitidos")
+    raise BlockedPath("caminhos absolutos não são permitidos")
   if "\\" in path or ":" in path:
-    raise ForbiddenPath("o caminho não pode conter barra invertida nem dois-pontos")
+    raise BlockedPath("o caminho não pode conter barra invertida nem dois-pontos")
   if _breaks_the_line(path):
-    raise ForbiddenPath("o caminho contém caracteres de controle ou quebra de linha")
+    raise BlockedPath("o caminho contém caracteres de controle ou quebra de linha")
   if any(part in ("", ".", "..") for part in path.split("/")):
-    raise ForbiddenPath("o caminho contém componentes vazios, '.' ou '..'")
+    raise BlockedPath("o caminho contém componentes vazios, '.' ou '..'")
 
 
 def check_inside(root, target):
-  """Levanta ForbiddenPath se `target`, depois de resolvido, não for a
+  """Levanta BlockedPath se `target`, depois de resolvido, não for a
   própria raiz `root` resolvida nem estiver abaixo dela. A contenção é
   verificada pela relação entre diretórios, componente a componente: um
   prefixo textual semelhante, como `www-outro/` diante de `www/`, não
@@ -306,4 +324,4 @@ def check_inside(root, target):
   except ValueError:
     inside = False
   if not inside:
-    raise ForbiddenPath("o caminho resolvido sai da raiz autorizada")
+    raise BlockedPath("o caminho resolvido sai da raiz autorizada")

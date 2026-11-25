@@ -1,11 +1,11 @@
 """Caminhos da URL até os recursos da pasta raiz, pela fronteira HTTP: o que é
 entregue, o que é bloqueado (403) e o que não existe (404)."""
 import os
+import tempfile
 import unittest
 
 import protocol as p
-from tests.support import CAN_EXCHANGE, Swapper
-from tests.test_http import HttpTestCase, put
+from tests.support import CAN_EXCHANGE, HttpTestCase, Swapper, put
 
 SECRET = b"SEGREDO FORA DA RAIZ"
 
@@ -17,7 +17,6 @@ class ContainmentTest(unittest.TestCase):
   tudo o que chega pela rede, ela é verificada diretamente."""
 
   def setUp(self):
-    import tempfile
     base = tempfile.TemporaryDirectory()
     self.addCleanup(base.cleanup)
     self.base = base.name
@@ -33,12 +32,12 @@ class ContainmentTest(unittest.TestCase):
   def test_sibling_folder_whose_name_starts_like_the_root_is_not_inside(self):
     outside = ["www-outro", "www-outro/segredo.txt", "wwwx.txt", "segredo.txt", ""]
     for target in outside:
-      with self.subTest(target=target), self.assertRaises(p.ForbiddenPath):
+      with self.subTest(target=target), self.assertRaises(p.BlockedPath):
         p.check_inside(self.root, os.path.join(self.base, *target.split("/")))
 
   def test_resolved_path_that_leaves_the_root_through_a_link_is_not_inside(self):
     os.symlink(os.path.join(self.base, "www-outro"), os.path.join(self.root, "irma"))
-    with self.assertRaises(p.ForbiddenPath):
+    with self.assertRaises(p.BlockedPath):
       p.check_inside(self.root, os.path.join(self.root, "irma", "segredo.txt"))
 
 
@@ -65,10 +64,7 @@ class PathTestCase(HttpTestCase):
     for target in targets:
       with self.subTest(target=target):
         response = self.get(target)
-        self.assertEqual(response.status_line, "HTTP/1.1 403 Forbidden")
-        self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
-        self.assertEqual(response.headers["content-length"], str(len(response.body)))
-        self.assertIn("Acesso negado", response.body.decode("utf-8"))
+        self.assertErrorPage(response, "HTTP/1.1 403 Forbidden", "Acesso negado")
         self.assertNotIn(SECRET, response.body)
 
 
