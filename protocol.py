@@ -24,13 +24,19 @@ INDEX = "index.html"
 
 REASONS = {
   200: "OK",
+  400: "Bad Request",
+  403: "Forbidden",
   404: "Not Found",
 }
 
 # Título da página de erro, para quem lê no navegador.
 TITLES = {
+  400: "Requisição inválida",
+  403: "Acesso negado",
   404: "Recurso não encontrado",
 }
+
+_HEX_DIGITS = b"0123456789abcdefABCDEF"
 
 # Content-Type pela extensão, sem diferenciar maiúsculas de minúsculas. Os
 # tipos de texto declaram UTF-8 para que o navegador não precise adivinhar a
@@ -99,10 +105,40 @@ def parse_request(head):
   return Request(method, target, version, headers)
 
 
+def request_path(target):
+  """Caminho pedido no alvo da requisição, decodificado: sem a query string
+  e o fragmento, com cada `%XX` trocado pelo byte que representa e o
+  resultado lido como UTF-8. Levanta BadRequest para `%` sem dois dígitos
+  hexadecimais ou bytes que não formam UTF-8.
+
+  A decodificação vem antes de qualquer verificação do caminho: assim
+  `..%2F..%2Fetc%2Fpasswd` chega à política de caminhos como
+  `../../etc/passwd` e é bloqueado. O alvo é recuperado como os bytes
+  originais, para que um nome enviado em UTF-8 sem codificação também
+  funcione."""
+  raw = target.split("?", 1)[0].split("#", 1)[0].encode("iso-8859-1")
+  decoded = bytearray()
+  position = 0
+  while position < len(raw):
+    if raw[position] == ord("%"):
+      digits = raw[position + 1:position + 3]
+      if len(digits) != 2 or any(digit not in _HEX_DIGITS for digit in digits):
+        raise BadRequest(f"codificação % inválida no caminho {target}")
+      decoded.append(int(digits, 16))
+      position += 3
+    else:
+      decoded.append(raw[position])
+      position += 1
+  try:
+    return decoded.decode("utf-8")
+  except UnicodeDecodeError:
+    raise BadRequest(f"o caminho {target} não é texto UTF-8") from None
+
+
 def resource_path(target):
-  """Caminho do recurso na pasta raiz, relativo a ela, para o alvo da
-  requisição: sem a barra inicial nem uma barra final, e o índice para a
-  raiz. Só uma barra final é retirada; outra que reste vira um componente
+  """Caminho do recurso na pasta raiz, relativo a ela, para o caminho
+  decodificado da requisição: sem a barra inicial nem uma barra final, e o
+  índice para a raiz. Só uma barra final é retirada; outra que reste vira um componente
   vazio, que a política de caminhos proíbe."""
   if target == "/":
     return INDEX

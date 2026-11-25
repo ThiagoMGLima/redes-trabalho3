@@ -219,15 +219,23 @@ class Connection:
   def _respond(self, request):
     """Envia a resposta à requisição e devolve o status e o tamanho do corpo
     anunciado. Para HEAD, o cabeçalho é o mesmo do GET, sem o corpo."""
-    path = p.resource_path(request.target)
+    try:
+      requested = p.request_path(request.target)
+    except p.BadRequest as error:
+      return self._send_error(request, 400, f"A requisição não pôde ser interpretada: {error}.")
+    path = p.resource_path(requested)
     try:
       file = open_resource(self._root, path)
     except ResourceRefused as refusal:
+      if refusal.code == p.PATH_FORBIDDEN:
+        self._log(f"[{self.name}] Caminho bloqueado: {request.target} (decodificado: {path!r}). {refusal}")
+        return self._send_error(
+          request, 403, f"O caminho {request.target} foi bloqueado: só os recursos da pasta raiz podem ser acessados.")
       if refusal.code in (p.NOT_FOUND, p.NOT_REGULAR):
         return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
       raise
     with file:
-      if p.names_a_folder(request.target):
+      if p.names_a_folder(requested):
         return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
       size = os.fstat(file.fileno()).st_size
       self.sock.sendall(p.response_head(200, p.content_type(path), size))
