@@ -18,10 +18,15 @@ import protocol as p
 
 HOST = ""
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
-MAX_CONNECTIONS = 10
+MAX_CONNECTIONS = 64
 RECEIVE_SIZE = 4096
 BLOCK_SIZE = 64 * 1024
 RECEIVE_TIMEOUT = 10.0
+SEND_TIMEOUT = 30.0
+# Fechamento gracioso: quanto esperar e quanto descartar do que o cliente
+# ainda envia depois da resposta.
+LINGER_TIMEOUT = 1.0
+LINGER_LIMIT = 64 * 1024
 
 
 def terminal_log(line):
@@ -150,23 +155,26 @@ class Connection:
 
   A thread lê uma requisição HTTP até a linha em branco, responde com o
   recurso pedido da pasta raiz e encerra a conexão: uma requisição por
-  conexão. `close` é idempotente e pode ser chamado por qualquer thread: a
-  primeira chamada interrompe a conexão e notifica `on_close` uma única vez
-  com o motivo. O socket é fechado pela própria thread de atendimento, ao
+  conexão. Uma conexão acima do limite (`refused`) só recebe a página 503.
+  `close` é idempotente e pode ser chamado por qualquer thread: a primeira
+  chamada interrompe a conexão e notifica `on_close` uma única vez com o
+  motivo. O socket é fechado pela própria thread de atendimento, ao
   terminar.
   """
 
-  def __init__(self, sock, address, number, *, root=ROOT, log=terminal_log, receive_timeout=RECEIVE_TIMEOUT,
-               on_close=None):
+  def __init__(self, sock, address, name, *, root=ROOT, log=terminal_log, receive_timeout=RECEIVE_TIMEOUT,
+               send_timeout=SEND_TIMEOUT, refused=False, on_close=None):
     self.sock = sock
     self.address = address
     self._root = root
     self._log = log
     self._receive_timeout = receive_timeout
+    self._send_timeout = send_timeout
+    self._refused = refused
     self._on_close = on_close
     self._lock = threading.Lock()
     self._closed = False
-    self._thread = threading.Thread(target=self._serve, name=f"conexão {number}")
+    self._thread = threading.Thread(target=self._serve, name=name)
 
   @property
   def name(self):
@@ -196,12 +204,39 @@ class Connection:
   def _serve(self):
     reason = "falha inesperada no atendimento"
     try:
-      reason = self._answer()
+      reason = self._refuse_over_the_limit() if self._refused else self._answer()
+    except TimeoutError:
+      reason = "prazo de envio expirado"
     except OSError as error:
       reason = f"falha na conexão: {error}"
     finally:
+      self._finish()
       self.close(reason)
       self.sock.close()
+
+  def _refuse_over_the_limit(self):
+    self.sock.settimeout(self._send_timeout)
+    self._send_error(None, 503, f"O servidor já atende {MAX_CONNECTIONS} conexões simultâneas. Tente de novo em instantes.")
+    return "recusada pelo limite de conexões"
+
+  def _finish(self):
+    """Fechamento gracioso, como recomenda a RFC 9112 (seção 9.6): encerra
+    só o sentido de envio, que avisa o fim da resposta, e descarta por um
+    instante o que o cliente ainda envia. Fechar o socket com bytes
+    recebidos e não lidos faz o sistema mandar um reset, que pode apagar a
+    resposta antes de o cliente lê-la."""
+    try:
+      self.sock.shutdown(socket.SHUT_WR)
+      deadline = time.monotonic() + LINGER_TIMEOUT
+      discarded = 0
+      while discarded < LINGER_LIMIT and (remaining := deadline - time.monotonic()) > 0:
+        self.sock.settimeout(remaining)
+        chunk = self.sock.recv(RECEIVE_SIZE)
+        if not chunk:
+          return
+        discarded += len(chunk)
+    except OSError:
+      pass
 
   def _answer(self):
     started = time.time()
@@ -271,7 +306,9 @@ class Connection:
   def _send_body(self, file):
     """Envia o arquivo, aberto em modo binário, em blocos de BLOCK_SIZE
     bytes, sem decodificar nada: o corpo sai exatamente como está no disco,
-    seja HTML ou imagem, e nunca é carregado inteiro na memória."""
+    seja HTML ou imagem, e nunca é carregado inteiro na memória. Cada envio
+    tem o prazo de envio: um cliente que para de ler perde só a própria
+    conexão."""
     while block := file.read(BLOCK_SIZE):
       self.sock.sendall(block)
 
@@ -303,7 +340,7 @@ class Connection:
       if not chunk:
         return None
       data += chunk
-    self.sock.settimeout(None)
+    self.sock.settimeout(self._send_timeout)
     if end > p.MAX_HEAD:
       raise p.RequestError(431, f"A requisição passa do limite de {p.MAX_HEAD} bytes até a linha em branco.")
     return bytes(data[:end])
@@ -323,16 +360,19 @@ def _clock(moment):
 
 
 class Server:
-  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, log=terminal_log, root=ROOT, receive_timeout=RECEIVE_TIMEOUT):
+  def __init__(self, host=HOST, port=p.DEFAULT_PORT, *, log=terminal_log, root=ROOT, receive_timeout=RECEIVE_TIMEOUT,
+               send_timeout=SEND_TIMEOUT):
     self._host = host
     self._port = port
-    self._root = root
+    self.root = root
     self._log = log
     self._receive_timeout = receive_timeout
+    self._send_timeout = send_timeout
     self._lock = threading.Lock()
     self._connections = set()
     self._started = []
     self._last_number = 0
+    self._last_refusal = 0
     self._stopping = False
 
   @property
@@ -402,25 +442,52 @@ class Server:
     if full:
       self._refuse_connection(sock, address)
       return
-    connection = Connection(sock, address, number, root=self._root, log=self._log,
-                            receive_timeout=self._receive_timeout, on_close=self._end_connection)
+    connection = Connection(sock, address, f"conexão {number}", root=self.root, log=self._log,
+                            receive_timeout=self._receive_timeout, send_timeout=self._send_timeout,
+                            on_close=self._end_connection)
     with self._lock:
       self._connections.add(connection)
+    self._log(f"Conectado: {address} na thread {connection.name}")
+    self._start(connection)
+
+  def _start(self, connection):
+    with self._lock:
       # Uma conexão sai do conjunto ao ser encerrada, mas o encerramento do
       # servidor ainda espera sua thread.
       self._started = [started for started in self._started if started.is_alive()] + [connection]
-    self._log(f"Conectado: {address} na thread {connection.name}")
     connection.start()
 
   def _refuse_connection(self, sock, address):
-    """Conexão excedente: fechada imediatamente; a recusa fica registrada."""
-    sock.close()
+    """Conexão excedente: uma thread curta, fora da contagem do limite, só
+    envia a página de erro 503 e fecha; a recusa fica registrada."""
+    with self._lock:
+      self._last_refusal += 1
+      number = self._last_refusal
+    refusal = Connection(sock, address, f"recusa {number}", log=self._log, send_timeout=self._send_timeout,
+                         refused=True)
     self._log(f"Recusado: {address} (limite de {MAX_CONNECTIONS} conexões simultâneas atingido)")
+    self._start(refusal)
 
   def _end_connection(self, connection, reason):
     with self._lock:
       self._connections.discard(connection)
     self._log(f"Desconectado: {connection.address} na thread {connection.name} ({reason})")
+
+
+def network_address():
+  """Endereço IPv4 desta máquina na rede local, para abrir o site de outro
+  dispositivo, ou None sem rede. Conectar um socket UDP não envia nenhum
+  pacote: só faz o sistema escolher a interface de saída, cujo endereço é
+  então lido."""
+  probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  try:
+    probe.connect(("10.255.255.255", 1))
+    address = probe.getsockname()[0]
+  except OSError:
+    return None
+  finally:
+    probe.close()
+  return None if address.startswith("127.") or address == "0.0.0.0" else address
 
 
 def main():
@@ -438,7 +505,12 @@ def main():
   # Com o servidor já aceitando conexões, um Ctrl+C a qualquer momento,
   # inclusive durante as mensagens iniciais, precisa encerrá-lo.
   try:
-    terminal_log(f"Servidor escutando na porta TCP {server.address[1]}.")
+    port = server.address[1]
+    terminal_log(f"Servidor escutando na porta TCP {port}.")
+    terminal_log(f"Pasta raiz: {server.root}")
+    terminal_log(f"Neste computador: http://localhost:{port}/")
+    address = network_address()
+    terminal_log(f"Na rede: http://{address}:{port}/" if address else "Na rede: sem endereço de rede encontrado")
     terminal_log("Ctrl+C encerra.")
     server.wait()
   except KeyboardInterrupt:

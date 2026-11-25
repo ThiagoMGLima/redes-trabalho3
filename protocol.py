@@ -39,6 +39,7 @@ REASONS = {
   408: "Request Timeout",
   431: "Request Header Fields Too Large",
   500: "Internal Server Error",
+  503: "Service Unavailable",
   505: "HTTP Version Not Supported",
 }
 
@@ -51,6 +52,7 @@ TITLES = {
   408: "Tempo esgotado",
   431: "Cabeçalho grande demais",
   500: "Erro interno do servidor",
+  503: "Servidor ocupado",
   505: "Versão do HTTP não suportada",
 }
 

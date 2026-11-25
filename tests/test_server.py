@@ -127,6 +127,20 @@ class ServerProcessTestCase(unittest.TestCase):
     return client
 
 
+class StartupMessageTest(ServerProcessTestCase):
+  def test_startup_shows_the_port_the_root_folder_and_the_addresses_to_open(self):
+    process, output, port = self.start_server_process()
+
+    output.wait_for("Ctrl+C encerra")
+    text = output.text
+    self.assertIn(f"porta TCP {port}", text)
+    self.assertIn(f"Pasta raiz: {os.path.join(os.path.dirname(SERVER_SCRIPT), 'www')}", text)
+    self.assertIn(f"http://localhost:{port}/", text)
+    self.assertRegex(text, rf"Na rede: (http://\d+\.\d+\.\d+\.\d+:{port}/|sem endereço de rede encontrado)")
+    process.send_signal(signal.SIGINT)
+    self.assertEqual(process.wait(5), 0)
+
+
 class PortTest(ServerProcessTestCase):
   def test_without_a_port_the_server_uses_8080(self):
     process, output = self.run_server_process()
