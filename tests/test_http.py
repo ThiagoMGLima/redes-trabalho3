@@ -196,6 +196,123 @@ class SuccessfulGetTest(HttpTestCase):
     self.assertRegex(line, r"início \d{2}:\d{2}:\d{2}\.\d{3}, fim \d{2}:\d{2}:\d{2}\.\d{3}")
 
 
+class ContentTypeTest(HttpTestCase):
+  # Tabela da spec #1, que é a fonte do valor esperado.
+  EXPECTED = {
+    "a.html": "text/html; charset=utf-8",
+    "a.htm": "text/html; charset=utf-8",
+    "a.css": "text/css; charset=utf-8",
+    "a.js": "text/javascript; charset=utf-8",
+    "a.txt": "text/plain; charset=utf-8",
+    "a.json": "application/json",
+    "a.png": "image/png",
+    "a.jpg": "image/jpeg",
+    "a.jpeg": "image/jpeg",
+    "a.gif": "image/gif",
+    "a.svg": "image/svg+xml",
+    "a.ico": "image/x-icon",
+    "a.webp": "image/webp",
+    "a.pdf": "application/pdf",
+    "FOTO.JPG": "image/jpeg",
+    "Pagina.HTML": "text/html; charset=utf-8",
+    "a.desconhecida": "application/octet-stream",
+    "sem-extensao": "application/octet-stream",
+    ".oculto": "application/octet-stream",
+    "pasta.png/arquivo": "application/octet-stream",
+  }
+
+  def test_content_type_follows_the_extension_of_the_resource_ignoring_case(self):
+    for path in self.EXPECTED:
+      put(self.root, path, b"x")
+    self.start_server()
+
+    for path, expected in self.EXPECTED.items():
+      with self.subTest(path=path):
+        self.assertEqual(self.get(f"/{path}").headers["content-type"], expected)
+
+
+class BinaryContentTest(HttpTestCase):
+  def test_bytes_that_are_not_text_arrive_unchanged(self):
+    content = bytes(range(256)) * 4 + b"\r\n\n\r\x00\xff\xfe" + "acentuação".encode("latin-1")
+    put(self.root, "dados.bin", content)
+    put(self.root, "imagem.png", b"\x89PNG\r\n\x1a\n" + content)
+    self.start_server()
+
+    for path in ("dados.bin", "imagem.png"):
+      with self.subTest(path=path):
+        response = self.get(f"/{path}")
+        self.assertEqual(response.headers["content-length"], str(len(response.body)))
+        self.assertEqual(response.body, b"\x89PNG\r\n\x1a\n" + content if path == "imagem.png" else content)
+
+  def test_file_larger_than_one_block_arrives_whole_with_its_exact_length(self):
+    content = os.urandom(3 * 1024 * 1024 + 17)
+    put(self.root, "grande.jpg", content)
+    self.start_server()
+
+    response = self.get("/grande.jpg")
+
+    self.assertEqual(response.headers["content-length"], str(len(content)))
+    self.assertEqual(response.body, content)
+
+  def test_empty_file_gets_length_zero_and_an_empty_body(self):
+    put(self.root, "vazio.txt", b"")
+    self.start_server()
+
+    response = self.get("/vazio.txt")
+
+    self.assertEqual(response.status, 200)
+    self.assertEqual(response.headers["content-length"], "0")
+    self.assertEqual(response.body, b"")
+
+
+class DemonstrationSiteTest(HttpTestCase):
+  """O site de demonstração em `www/` do projeto."""
+
+  RESOURCES = {
+    "/": "text/html; charset=utf-8",
+    "/pagina.html": "text/html; charset=utf-8",
+    "/estilo.css": "text/css; charset=utf-8",
+    "/favicon.ico": "image/x-icon",
+    "/foto.jpg": "image/jpeg",
+    "/diagrama.png": "image/png",
+    "/grande.png": "image/png",
+  }
+
+  def setUp(self):
+    super().setUp()
+    self.site = os.path.join(PROJECT_ROOT, "www")
+    self.start_server(root=self.site)
+
+  def test_every_resource_of_the_site_is_served_whole_with_its_type(self):
+    for target, expected in self.RESOURCES.items():
+      with self.subTest(target=target):
+        response = self.get(target)
+        name = "index.html" if target == "/" else target[1:]
+        with open(os.path.join(self.site, name), "rb") as file:
+          content = file.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["content-type"], expected)
+        self.assertEqual(response.body, content)
+
+  def test_images_are_real_jpeg_png_and_ico_files(self):
+    signatures = {"/foto.jpg": b"\xff\xd8\xff", "/diagrama.png": b"\x89PNG\r\n\x1a\n",
+                  "/grande.png": b"\x89PNG\r\n\x1a\n", "/favicon.ico": b"\x00\x00\x01\x00"}
+    for target, signature in signatures.items():
+      with self.subTest(target=target):
+        self.assertTrue(self.get(target).body.startswith(signature))
+
+  def test_large_image_for_the_concurrency_demonstration_has_about_20_mb(self):
+    size = int(self.get("/grande.png").headers["content-length"])
+    self.assertGreater(size, 15 * 1000 * 1000)
+    self.assertLess(size, 30 * 1000 * 1000)
+
+  def test_index_shows_the_jpeg_and_the_png_and_links_the_large_image(self):
+    index = self.get("/").body.decode("utf-8")
+    for reference in ('src="/foto.jpg"', 'src="/diagrama.png"', 'href="/grande.png"', 'href="/pagina.html"',
+                      'href="/estilo.css"'):
+      self.assertIn(reference, index)
+
+
 class StatementTemplateTest(HttpTestCase):
   def test_the_page_of_the_statement_is_served_unchanged_from_the_project_root_folder(self):
     self.start_server(root=os.path.join(PROJECT_ROOT, "www"))

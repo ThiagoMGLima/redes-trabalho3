@@ -20,6 +20,7 @@ HOST = ""
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
 MAX_CONNECTIONS = 10
 RECEIVE_SIZE = 4096
+BLOCK_SIZE = 64 * 1024
 
 
 def terminal_log(line):
@@ -214,10 +215,18 @@ class Connection:
     except ResourceRefused as refusal:
       return f"recurso recusado: {refusal}"
     with file:
-      body = file.read()
-    self.sock.sendall(p.response_head(200, p.content_type(path), len(body)) + body)
-    self._log_request(request, 200, len(body), started)
+      size = os.fstat(file.fileno()).st_size
+      self.sock.sendall(p.response_head(200, p.content_type(path), size))
+      self._send_body(file)
+    self._log_request(request, 200, size, started)
     return "resposta enviada"
+
+  def _send_body(self, file):
+    """Envia o arquivo, aberto em modo binário, em blocos de BLOCK_SIZE
+    bytes, sem decodificar nada: o corpo sai exatamente como está no disco,
+    seja HTML ou imagem, e nunca é carregado inteiro na memória."""
+    while block := file.read(BLOCK_SIZE):
+      self.sock.sendall(block)
 
   def _receive_head(self):
     """Bytes da requisição até a primeira linha em branco, exclusive, ou
