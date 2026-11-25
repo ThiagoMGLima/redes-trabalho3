@@ -5,6 +5,7 @@ política de caminhos da pasta raiz, herdada do Trabalho 2, junto com a
 porta da linha de comando.
 """
 import argparse
+import html
 import os
 import time
 import unicodedata
@@ -23,6 +24,12 @@ INDEX = "index.html"
 
 REASONS = {
   200: "OK",
+  404: "Not Found",
+}
+
+# Título da página de erro, para quem lê no navegador.
+TITLES = {
+  404: "Recurso não encontrado",
 }
 
 # Content-Type pela extensão, sem diferenciar maiúsculas de minúsculas. Os
@@ -94,10 +101,18 @@ def parse_request(head):
 
 def resource_path(target):
   """Caminho do recurso na pasta raiz, relativo a ela, para o alvo da
-  requisição: sem a barra inicial, e o índice para a raiz."""
+  requisição: sem a barra inicial nem uma barra final, e o índice para a
+  raiz. Só uma barra final é retirada; outra que reste vira um componente
+  vazio, que a política de caminhos proíbe."""
   if target == "/":
     return INDEX
-  return target.removeprefix("/")
+  return target.removeprefix("/").removesuffix("/")
+
+
+def names_a_folder(target):
+  """Um alvo que termina em barra, exceto a raiz, pede uma pasta; só a raiz
+  tem índice, então nenhum outro pedido de pasta corresponde a um recurso."""
+  return target != "/" and target.endswith("/")
 
 
 def content_type(path):
@@ -113,6 +128,29 @@ def http_date(moment=None):
   t = time.gmtime(moment)
   return (f"{_WEEKDAYS[t.tm_wday]}, {t.tm_mday:02d} {_MONTHS[t.tm_mon - 1]} {t.tm_year} "
           f"{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} GMT")
+
+
+def error_page(status, explanation):
+  """Página de erro em HTML, gerada aqui e não lida da pasta raiz, já
+  codificada em UTF-8: é texto montado pelo servidor, ao contrário do corpo
+  dos recursos, que segue como está no disco. A explicação é escapada,
+  porque pode repetir o caminho pedido."""
+  title = TITLES[status]
+  page = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <title>{status} {title}</title>
+  </head>
+  <body>
+    <h1>{title}</h1>
+    <p>{html.escape(explanation)}</p>
+    <hr>
+    <p>HTTP {status} {REASONS[status]} · {SERVER_NAME}</p>
+  </body>
+</html>
+"""
+  return page.encode("utf-8")
 
 
 def response_head(status, content_type, length):

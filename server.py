@@ -209,17 +209,39 @@ class Connection:
       request = p.parse_request(head)
     except p.BadRequest as error:
       return f"requisição malformada: {error}"
+    try:
+      status, size = self._respond(request)
+    except ResourceRefused as refusal:
+      return f"recurso recusado: {refusal}"
+    self._log_request(request, status, size, started)
+    return "resposta enviada"
+
+  def _respond(self, request):
+    """Envia a resposta à requisição e devolve o status e o tamanho do corpo
+    anunciado. Para HEAD, o cabeçalho é o mesmo do GET, sem o corpo."""
     path = p.resource_path(request.target)
     try:
       file = open_resource(self._root, path)
     except ResourceRefused as refusal:
-      return f"recurso recusado: {refusal}"
+      if refusal.code in (p.NOT_FOUND, p.NOT_REGULAR):
+        return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
+      raise
     with file:
+      if p.names_a_folder(request.target):
+        return self._send_error(request, 404, f"O recurso {request.target} não existe neste servidor.")
       size = os.fstat(file.fileno()).st_size
       self.sock.sendall(p.response_head(200, p.content_type(path), size))
-      self._send_body(file)
-    self._log_request(request, 200, size, started)
-    return "resposta enviada"
+      if request.method != "HEAD":
+        self._send_body(file)
+    return 200, size
+
+  def _send_error(self, request, status, explanation):
+    """Envia a página de erro com seu tamanho exato em bytes."""
+    page = p.error_page(status, explanation)
+    self.sock.sendall(p.response_head(status, p.CONTENT_TYPES["html"], len(page)))
+    if request.method != "HEAD":
+      self.sock.sendall(page)
+    return status, len(page)
 
   def _send_body(self, file):
     """Envia o arquivo, aberto em modo binário, em blocos de BLOCK_SIZE
