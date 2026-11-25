@@ -6,37 +6,37 @@ Cada item é uma exigência do professor e precisa estar cumprido na entrega. Ma
 
 ## 1. Requisitos gerais e restrições
 
-- [ ] **G1** — O código do Trabalho 2 (servidor TCP multithread) é a base do Trabalho 3.
-- [ ] **G2** — Sem bibliotecas de alto nível que abstraiam sockets ou HTTP; sockets TCP manipulados diretamente pela API do SO/linguagem.
-- [ ] **G3** — Nada que mascare o funcionamento do HTTP: parsing da requisição e montagem da resposta feitos pelo próprio código.
+- [x] **G1** — O código do Trabalho 2 (servidor TCP multithread) é a base do Trabalho 3.
+- [x] **G2** — Sem bibliotecas de alto nível que abstraiam sockets ou HTTP; sockets TCP manipulados diretamente pela API do SO/linguagem.
+- [x] **G3** — Nada que mascare o funcionamento do HTTP: parsing da requisição e montagem da resposta feitos pelo próprio código.
 
 ## 2. Servidor HTTP
 
-- [ ] **S1** — O servidor é executado primeiro e aguarda conexões em porta > 1024.
-- [ ] **S2** — Cada conexão aceita recebe uma thread dedicada.
-- [ ] **S3** — A thread lê os dados enviados pelo browser e faz o parsing da requisição HTTP (ex.: `GET /pagina.html HTTP/1.1`).
-- [ ] **S4** — A resposta é o cabeçalho HTTP correto seguido pelo conteúdo do arquivo.
-- [ ] **S5** — Múltiplas conexões simultâneas são tratadas, inclusive as requisições automáticas do browser (ex.: `favicon.ico`).
-- [ ] **S6** — Recursos binários (JPEG/PNG) são entregues sem corrupção.
-- [ ] **S7** — Situações de erro são tratadas (no mínimo 404 com página HTML de erro).
+- [x] **S1** — O servidor é executado primeiro e aguarda conexões em porta > 1024.
+- [x] **S2** — Cada conexão aceita recebe uma thread dedicada.
+- [x] **S3** — A thread lê os dados enviados pelo browser e faz o parsing da requisição HTTP (ex.: `GET /pagina.html HTTP/1.1`).
+- [x] **S4** — A resposta é o cabeçalho HTTP correto seguido pelo conteúdo do arquivo.
+- [x] **S5** — Múltiplas conexões simultâneas são tratadas, inclusive as requisições automáticas do browser (ex.: `favicon.ico`).
+- [x] **S6** — Recursos binários (JPEG/PNG) são entregues sem corrupção.
+- [x] **S7** — Situações de erro são tratadas (no mínimo 404 com página HTML de erro).
 
 ## 3. Cliente (browser)
 
-- [ ] **C1** — Funciona com um navegador comum (Chrome, Firefox etc.).
-- [ ] **C2** — A URL `http://[IP_do_Servidor]:[Porta]/arquivo.html` exibe o arquivo renderizado.
+- [x] **C1** — Funciona com um navegador comum (Chrome, Firefox etc.).
+- [x] **C2** — A URL `http://[IP_do_Servidor]:[Porta]/arquivo.html` exibe o arquivo renderizado.
 
 ## 4. Design do protocolo — projetar e justificar
 
 Cada decisão fica registrada (ADR ou spec) e é defendida no vídeo.
 
-- [ ] **D1** — Parsing: como ler e interpretar a linha de requisição (método, caminho, versão) e os cabeçalhos.
-- [ ] **D2** — Parsing: como delimitar o fim dos cabeçalhos (linha em branco / CRLF).
-- [ ] **D3** — Resposta: estrutura Linha de Status → Cabeçalhos → Linha em Branco (CRLF) → Conteúdo.
-- [ ] **D4** — Resposta: `Content-Type` e `Content-Length` obrigatórios; `Content-Type` determinado dinamicamente pela extensão.
-- [ ] **D5** — `Content-Length` é o tamanho exato do corpo em bytes (sem ele o browser fica carregando).
-- [ ] **D6** — Binário: diferença entre enviar texto (HTML) e dados binários (JPEG/PNG), sem corrupção de bytes.
-- [ ] **D7** — Controle e erros: respostas `HTTP/1.x 200 OK` e de erro (ex.: `404 Not Found`) formatadas corretamente.
-- [ ] **D8** — Path traversal: sanitização do caminho impede acesso fora da pasta raiz (ex.: `../../arquivo_do_sistema`).
+- [x] **D1** — Parsing: como ler e interpretar a linha de requisição (método, caminho, versão) e os cabeçalhos.
+- [x] **D2** — Parsing: como delimitar o fim dos cabeçalhos (linha em branco / CRLF).
+- [x] **D3** — Resposta: estrutura Linha de Status → Cabeçalhos → Linha em Branco (CRLF) → Conteúdo.
+- [x] **D4** — Resposta: `Content-Type` e `Content-Length` obrigatórios; `Content-Type` determinado dinamicamente pela extensão.
+- [x] **D5** — `Content-Length` é o tamanho exato do corpo em bytes (sem ele o browser fica carregando).
+- [x] **D6** — Binário: diferença entre enviar texto (HTML) e dados binários (JPEG/PNG), sem corrupção de bytes.
+- [x] **D7** — Controle e erros: respostas `HTTP/1.x 200 OK` e de erro (ex.: `404 Not Found`) formatadas corretamente.
+- [x] **D8** — Path traversal: sanitização do caminho impede acesso fora da pasta raiz (ex.: `../../arquivo_do_sistema`).
 
 ## 5. Vídeo — Parte 1: demonstração prática
 
