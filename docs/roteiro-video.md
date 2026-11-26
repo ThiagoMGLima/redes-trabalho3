@@ -10,13 +10,13 @@ Faça toda a preparação da seção [Antes de gravar](#antes-de-gravar) e um en
 
 ### 0:00–0:40 — Concorrência e mídia (V1, V2)
 
-**Mostrar:** o Chrome e T1 lado a lado.
+**Tela:** Chrome à esquerda, T1 à direita.
 
-**Fazer, nesta ordem:**
+**Fazer:**
 
-1. Na **aba A**, que tem o throttling `Demo 10 Mbit/s`: digite `BASE/grande.png` → Enter. A imagem começa a carregar devagar.
-2. Na **aba B**, sem throttling: digite `BASE/` → Enter. O índice aparece na hora, com a foto JPEG e o diagrama PNG.
-3. Aponte em **T1**: o `Conectado: … na thread conexão N` da imagem grande, ainda sem a linha de requisição, e as conexões seguintes, que já responderam `index.html`, `estilo.css`, `foto.jpg`, `diagrama.png` e `favicon.ico` com 200.
+1. Aba A: `BASE/grande.png` → Enter.
+2. Aba B: `BASE/` → Enter.
+3. T1: apontar a conexão da `grande.png`, ainda aberta, e as outras já com 200.
 
 **Fala:**
 
@@ -26,11 +26,11 @@ Faça toda a preparação da seção [Antes de gravar](#antes-de-gravar) e um en
 
 **Fazer:**
 
-1. Na **aba B**: `BASE/pagina.html` → Enter. A página do enunciado aparece.
-2. No DevTools da aba B, clique em `pagina.html` → **Headers** → **Response Headers**, com **Raw** marcado. Aponte `HTTP/1.1 200 OK`, `Content-Type: text/html; charset=utf-8` e `Content-Length: 251`.
-3. Clique em `foto.jpg`, que ficou no log: aponte `Content-Type: image/jpeg` e `Content-Length: 31739`.
-4. Em **T0**: `tamanhos` → Enter. Aponte **251** e **31739**.
-5. Em **T1**, se a imagem grande já terminou: aponte a linha `"GET /grande.png HTTP/1.1" 200 20302470 bytes`, com início antes e fim depois das outras. Se ainda não terminou, aponte-a no bloco seguinte.
+1. Aba B: `BASE/pagina.html` → Enter.
+2. Rede: `pagina.html` → Headers → Raw. Apontar `200 OK`, `Content-Type` e `Content-Length: 251`.
+3. Rede: `foto.jpg`. Apontar `image/jpeg` e `31739`.
+4. T0: `tamanhos` → Enter.
+5. T1: apontar a linha da `grande.png`, com início e fim. Se ainda não terminou, apontar no próximo bloco.
 
 **Fala:**
 
@@ -38,7 +38,10 @@ Faça toda a preparação da seção [Antes de gravar](#antes-de-gravar) e um en
 
 ### 1:10–1:30 — Erro 404 (V4)
 
-**Fazer:** na **aba B**: `BASE/nao-existe.html` → Enter. Aponte a página **Recurso não encontrado** e, na aba Rede, o status **404 Not Found** com `Content-Type: text/html`.
+**Fazer:**
+
+1. Aba B: `BASE/nao-existe.html` → Enter.
+2. Rede: apontar `404 Not Found`.
 
 **Fala:**
 
@@ -48,9 +51,9 @@ Faça toda a preparação da seção [Antes de gravar](#antes-de-gravar) e um en
 
 **Fazer:**
 
-1. Na **aba B**: `BASE/..%2F..%2F..%2Fetc%2Fpasswd` → Enter. Aponte **Acesso negado** e o status **403 Forbidden**.
-2. Em **T1**: aponte `Caminho bloqueado: /..%2F..%2F..%2Fetc%2Fpasswd (decodificado: '../../../etc/passwd')`.
-3. Em **T0**: `traversal` → Enter. Aponte `HTTP/1.1 403 Forbidden`.
+1. Aba B: `BASE/..%2F..%2F..%2Fetc%2Fpasswd` → Enter.
+2. T1: apontar `Caminho bloqueado`.
+3. T0: `traversal` → Enter. Apontar `403 Forbidden`.
 
 **Fala:**
 
