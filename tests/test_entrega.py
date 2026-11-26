@@ -1,6 +1,6 @@
 """Materiais de entrega, rodando os scripts como no terminal: as cópias sem
 comentários para a gravação do vídeo, as linhas que o roteiro do vídeo cita
-nelas e o ZIP do código-fonte."""
+nelas e o ZIP do código-fonte, igual ao mostrado no vídeo."""
 import ast
 import io
 import os
@@ -141,32 +141,57 @@ class SourcePackageTest(unittest.TestCase):
     result = run_script("empacotar.py", self.package)
     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-  def test_package_has_the_programs_the_site_the_tests_and_the_readme_and_nothing_else(self):
-    expected = {"server.py", "protocol.py", "README.md"}
-    expected |= {f"www/{name}" for name in files_under(os.path.join(PROJECT_ROOT, "www"))}
-    expected |= {f"tests/{name}" for name in files_under(os.path.join(PROJECT_ROOT, "tests"))}
+  def test_package_has_the_programs_and_the_site_and_nothing_else(self):
+    expected = set(PROGRAMS) | {f"www/{name}" for name in files_under(os.path.join(PROJECT_ROOT, "www"))}
 
     with zipfile.ZipFile(self.package) as package:
       names = {name for name in package.namelist() if not name.endswith("/")}
 
     self.assertEqual(names, {f"Trabalho3/{name}" for name in expected})
 
-  def test_package_keeps_the_documented_sources(self):
+  def test_programs_are_identical_to_the_copies_shown_in_the_video(self):
+    copies = os.path.join(self.base, "gravacao")
+    result = run_script("preparar_gravacao.py", copies)
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     with zipfile.ZipFile(self.package) as package:
       for name in PROGRAMS:
         with self.subTest(name=name):
-          self.assertEqual(package.read(f"Trabalho3/{name}").decode("utf-8"), read(os.path.join(PROJECT_ROOT, name)))
+          with open(os.path.join(copies, name), "rb") as file:
+            self.assertEqual(package.read(f"Trabalho3/{name}"), file.read())
 
-  def test_test_suite_passes_from_the_extracted_package(self):
+  def test_site_files_are_identical_to_the_project_site(self):
+    with zipfile.ZipFile(self.package) as package:
+      for name in files_under(os.path.join(PROJECT_ROOT, "www")):
+        with self.subTest(name=name):
+          with open(os.path.join(PROJECT_ROOT, "www", name), "rb") as file:
+            self.assertEqual(package.read(f"Trabalho3/www/{name}"), file.read())
+
+  def test_extracted_server_serves_the_site(self):
     with zipfile.ZipFile(self.package) as package:
       package.extractall(self.base)
     extracted = os.path.join(self.base, "Trabalho3")
+    port = free_port()
+    process = subprocess.Popen([sys.executable, "-u", "server.py", str(port)], cwd=extracted,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    output = OutputReader(process.stdout)
+    self.addCleanup(output.close)
+    self.addCleanup(process.wait, 5)
+    self.addCleanup(process.kill)
+    output.wait_for(f"porta TCP {port}")
 
-    result = subprocess.run([sys.executable, "-m", "unittest"], cwd=extracted, capture_output=True, text=True,
-                            timeout=300)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+      sock.sendall(b"GET /foto.jpg HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      data = bytearray()
+      while chunk := sock.recv(65536):
+        data += chunk
 
-    self.assertEqual(result.returncode, 0, result.stderr[-3000:])
-    self.assertIn("OK", result.stderr)
+    with open(os.path.join(PROJECT_ROOT, "www", "foto.jpg"), "rb") as file:
+      self.assertTrue(bytes(data).startswith(b"HTTP/1.1 200 OK\r\n"))
+      self.assertTrue(bytes(data).endswith(b"\r\n\r\n" + file.read()))
+    process.send_signal(signal.SIGINT)
+    self.assertEqual(process.wait(5), 0)
 
 
 if __name__ == "__main__":
