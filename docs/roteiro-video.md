@@ -4,7 +4,7 @@
 
 Faça toda a preparação da seção [Antes de gravar](#antes-de-gravar) e um ensaio cronometrado antes da gravação. Deixe esta cola fora da área capturada.
 
-**Aba A** e **aba B** = as duas abas do Chrome, cada uma com o DevTools aberto na aba Rede (Network). **T1** = terminal do servidor; **T0** = terminal auxiliar. **BASE** = o endereço que o servidor mostra em "Na rede", por exemplo `http://192.168.0.10:8080`.
+**Aba A** e **aba B** = as duas abas do Chrome, cada uma com o DevTools aberto na aba Rede (Network). **T1** = terminal do servidor; **T0** = terminal auxiliar. **BASE** = o endereço que o servidor mostra em "Na rede", por exemplo `http://192.168.0.10:8080`. Todo endereço com BASE é digitado na **barra de endereço** do Chrome, não no console do DevTools, com BASE trocado pelo endereço real: `BASE/grande.png` vira, por exemplo, `http://192.168.0.10:8080/grande.png`.
 
 ## Parte 1 — Demonstração, 0:00–2:00
 
@@ -63,10 +63,10 @@ Maximize o VS Code. As duas abas já estão abertas: `server.py` e `protocol.py`
 **Para cada linha da tabela:** clique na aba → **Ctrl+G** → número → **Enter**. Enquadre o intervalo indicado, rolando um pouco se precisar, e aponte as linhas enquanto fala. São **10 enquadramentos**; não acrescente outros.
 
 | Tempo | Aba → Ctrl+G | Mostrar e apontar | Fala |
-|---|---|---|---|
-| **2:00–2:15** | `server.py` → **323** | **322–334**: `socket.socket(AF_INET, SOCK_STREAM)` **323**, `bind` **326**, `listen` **327**. | Segunda parte: código. O socket de escuta é criado aqui. AF_INET é IPv4, e SOCK_STREAM é o identificador que garante TCP; UDP seria SOCK_DGRAM. Depois vêm bind e listen. |
+| --- | --- | --- | --- |
+| **2:00–2:15** | `server.py` → **323** | **322–334**: `socket.socket(AF_INET, SOCK_STREAM)` **323**, `bind` **326**, `listen` **327**. | Segunda parte: código. O socket de escuta é criado aqui. AF\_INET é IPv4, e SOCK\_STREAM é o identificador que garante TCP; UDP seria SOCK\_DGRAM. Depois vêm bind e listen. |
 | **2:15–2:45** | `server.py` → **366** | **357–388**: `accept` **363**, `_open_connection` **366**, `Connection` **377**, início da thread **388**. | A thread de aceitação espera no accept. Cada socket aceito vira um objeto Connection com uma thread própria, iniciada aqui, e o laço volta logo para o accept. |
-| Mesmo bloco | `server.py` → **145** | **132–175**: socket **135**, endereço **136**, `Thread(target=self._serve)` **145**, `_serve` **172**. | O estado da conexão fica nesse objeto: o socket, o endereço do cliente e a thread, que executa _serve só com esse socket. Por isso uma conexão lenta não segura as outras. |
+| Mesmo bloco | `server.py` → **145** | **132–175**: socket **135**, endereço **136**, `Thread(target=self._serve)` **145**, `_serve` **172**. | O estado da conexão fica nesse objeto: o socket, o endereço do cliente e a thread, que executa \_serve só com esse socket. Por isso uma conexão lenta não segura as outras. |
 | **2:45–3:15** | `server.py` → **121** | `os.fdopen(descriptor, "rb")` **121**. | Todo recurso é aberto em modo binário, rb. |
 | Mesmo bloco | `server.py` → **242** | **226–260**: `fstat` **239**, cabeçalho **240**, `_send_body` **242**, blocos **259–260**. | O corpo vai em blocos de 64 kibibytes, exatamente como está no disco, sem decodificar nada. HTML e imagem seguem o mesmo caminho; só o Content-Type muda. Ler a imagem como texto trocaria bytes e corromperia o arquivo. |
 | **3:15–3:45** | `protocol.py` → **198** | **179–209**: página de erro `encode("utf-8")` **195**; linha de status **200**, `Content-Type` **203**, `Content-Length` **204**, linha em branco e `encode("ascii")` **209**. | O que é texto é codificado explicitamente: a página de erro em UTF-8 e o cabeçalho em ASCII. O cabeçalho tem a linha de status, o Content-Type e o Content-Length, e termina com a linha em branco. |
@@ -79,7 +79,7 @@ Maximize o VS Code. As duas abas já estão abertas: `server.py` e `protocol.py`
 
 ## Cola de navegação
 
-```text
+```
 PRÁTICA
 A: BASE/grande.png → B: BASE/ → T1: conexões
 B: BASE/pagina.html → Rede: pagina.html, foto.jpg → T0: tamanhos → T1: grande terminou
@@ -98,7 +98,7 @@ protocol 239 → parar
 As linhas são das cópias sem comentários geradas por `scripts/preparar_gravacao.py`, não dos fontes documentados. O teste `test_entrega.RecordingCopiesTest.test_lines_cited_in_the_video_script_hold_the_code_it_names` confere cada linha desta tabela; se ele falhar, o código mudou e o roteiro precisa ser atualizado antes de gravar.
 
 | Arquivo | Linha | Código |
-|---|---|---|
+| --- | --- | --- |
 | `server.py` | 46 | `p.check_relative_path(path)` |
 | `server.py` | 58 | `mode = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False).st_mode` |
 | `server.py` | 60 | `raise _refusal_for(error, shown) from None` |
@@ -142,7 +142,7 @@ As linhas são das cópias sem comentários geradas por `scripts/preparar_gravac
 ## Cobertura
 
 | Exigência | Onde |
-|---|---|
+| --- | --- |
 | V1 — Duas abas sem bloqueio | 0:00–0:40; intervalo da imagem grande em 0:40–1:10 |
 | V2 — HTML, JPEG e PNG | 0:00–0:40 |
 | V3 — `200 OK`, `Content-Type` dinâmico e `Content-Length` exato | 0:40–1:10 |
@@ -161,7 +161,7 @@ As linhas são das cópias sem comentários geradas por `scripts/preparar_gravac
 
 ### 1. Preparar as cópias, em T0
 
-```bash
+```
 cd /home/taronky/Documents/UT/Redes/Trabalho3
 DEMO="$(mktemp -d /tmp/trabalho3-video.XXXXXX)"
 python3 scripts/preparar_gravacao.py "$DEMO"
@@ -172,7 +172,7 @@ O script copia `server.py` e `protocol.py` sem comentários nem docstrings, junt
 
 ### 2. Iniciar o servidor, em T1
 
-```bash
+```
 DEMO="$(cat /tmp/trabalho3-video-atual.txt)"
 cd "$DEMO" && python3 server.py
 ```
@@ -183,7 +183,7 @@ Anote o endereço de **Na rede**: é o BASE do roteiro. Usar o IP, e não `local
 
 Troque o endereço pelo que T1 mostrou e cole o bloco:
 
-```bash
+```
 DEMO="$(cat /tmp/trabalho3-video-atual.txt)"
 BASE="http://192.168.0.10:8080"
 tamanhos() { stat -c '%n %s bytes' "$DEMO/www/pagina.html" "$DEMO/www/foto.jpg"; }
@@ -194,7 +194,7 @@ Teste os dois atalhos uma vez e limpe o terminal com `clear`.
 
 ### 4. Preparar o Chrome
 
-1. Abra uma janela com duas abas em `about:blank` e o DevTools (F12) na aba **Rede** em cada uma.
+1. Abra uma janela com duas abas em `about:blank` e o DevTools (F12) na aba **Rede** em cada uma. As abas ficam vazias até a gravação: assim o DevTools e o throttling já estão prontos quando o primeiro endereço for digitado, e a aba Rede registra o pedido desde o início.
 2. Nas duas abas, marque **Disable cache**. Na aba B, marque também **Preserve log**, para que `foto.jpg` continue na lista depois de abrir `pagina.html`.
 3. Crie um perfil de throttling: DevTools → ⚙ Settings → **Throttling** → **Add profile**, com nome `Demo 10 Mbit/s`, Download `10000` kbit/s, Upload `10000` kbit/s e Latency `0`. Selecione-o **só na aba A**.
 4. No ensaio, `grande.png` deve levar de 15 a 20 segundos. Se terminar antes de você abrir o índice na aba B, reduza o Download para `5000`.
@@ -202,7 +202,7 @@ Teste os dois atalhos uma vez e limpe o terminal com `clear`.
 
 ### 5. Preparar o VS Code
 
-Abra `server.py` e `protocol.py` **de `$DEMO`**, nunca os do repositório, que têm comentários. Ajuste o zoom para que caibam cerca de 35 linhas, e feche a barra lateral e o painel do terminal.
+Abra `server.py` e `protocol.py` **de** **`$DEMO`**, nunca os do repositório, que têm comentários. Ajuste o zoom para que caibam cerca de 35 linhas, e feche a barra lateral e o painel do terminal.
 
 ### 6. Organizar a tela
 
